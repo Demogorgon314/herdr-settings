@@ -22,7 +22,7 @@ blurred.
 | `mods/t3-pane` | Pane header: program icon, title, folder, status; split, zoom and close |
 | `mods/t3-tools-nav` | Segmented switch over the tools panel, with a sliding pill; icons only under 326px |
 | `mods/t3-files` | Clone of Herdr's `files`; hovering a row fades in Favorite, `cd` here, and Copy path |
-| `mods/t3-changes` | Clone of Herdr's `changes`: files in Staged / Changes / Untracked sections with stage, unstage and discard on hover; a GitHub-style review window for the diffs; an [Orca](https://github.com/stablyai/orca)-style commit box where ✨ asks an agent of your choice to write the message |
+| `mods/t3-changes` | Clone of Herdr's `changes`: files in Staged / Changes / Untracked sections with stage, unstage and discard on hover; a GitHub-style review (window or tab) with line comments you send to an agent; an [Orca](https://github.com/stablyai/orca)-style commit box where ✨ asks an agent of your choice to write the message |
 | `mods/t3-sessions` | pi, Claude Code, OpenCode and Codex sessions recorded in the current space's folder; click to resume, `+` to tag, `#tag` to filter |
 | `mods/t3-favorites` | Saved folders; click to switch to that space (or open one) |
 | `keys.json` | Only the `layout:herdr-t3` section: `cmd-shift-b` switches the sidebar, `cmd-shift-a` the one-agent view |
@@ -71,6 +71,19 @@ Clicking a file, or the review icon in the header (Review all changes), opens a 
 changed": the changed files as a tree on the left, every diff on the right as a card with old and
 new line numbers. Click a file in the tree (or press `j` / `k`) to go to it, a card's header to
 fold it, and **Viewed** to tick it off and fold it. Diffs over 800 lines start folded. Esc closes.
+The window follows the folder (Refresh reads it again; a viewed file that changed is unticked),
+and its tab button moves the review, as it is, into a tab of its own.
+
+### Review comments
+
+Leave comments on the diff the way GitHub does: click a line (shift-click another for a range),
+or a card's comment button for the whole file, write in the box at the bottom and press ⌘↵.
+Comments show under their lines; click one to edit or delete it. **Send N comments** in the title
+bar pastes them all into an agent in the current space (the focused one first), each as file,
+lines, the quoted code and your comment, and submits it, as
+[Orca](https://github.com/stablyai/orca) sends review notes; sent comments are cleared. The same
+menu copies them as text or deletes them. Comments are kept per repository in
+`t3.review.comments` until sent.
 
 ## AI commit messages
 
@@ -121,4 +134,5 @@ It rebuilds `layouts/`, `mods/` and `keys.json` from that layout and the non-shi
 writes and are not tracked.
 
 Favorites, session tags and commit message settings live in Herdr's `shared.json` under
-`t3.favorites`, `t3.sessions.tags`, `t3.commit.agent`, `t3.commit.settings` and `t3.commit.models`.
+`t3.favorites`, `t3.sessions.tags`, `t3.commit.agent`, `t3.commit.settings`, `t3.commit.models`
+and `t3.review.comments`.

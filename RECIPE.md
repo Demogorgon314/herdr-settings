@@ -35,13 +35,18 @@ text 11–13px.
   untracked `ansi2`, deleted and conflicted `ansi1`, modified `ansi3`), the name, its folder
   dimmed, `+a −d` and the status letter. With nothing changed, an icon in a circle over a title
   and a line of detail.
-- **Diff window**: GitHub's "Files changed" in a 1040×760 window: a 44px title bar (`Changes`,
-  file count, `+a −d`, `x / N viewed`, Collapse all, ✕), a 260px tree of the files under their
+- **Diff window**: GitHub's "Files changed" in a 1040×760 window or a tab: a 44px title bar
+  (`Changes`, file count, `+a −d`, a Send button once there are comments, `x / N viewed`, Refresh,
+  Collapse all, and in the window Open in a tab and ✕), a 260px tree of the files under their
   sections (one-child folders squashed to `src/lib`, a ✓ on viewed files) and the diffs stacked as
   cards: a 34px `raised` header (fold chevron, status, folder dimmed and name bold, a section
-  badge, `+a −d`, an 82px Viewed checkbox), then 20px rows with old and new line numbers in two
+  badge, `+a −d`, a 40px comment button with the file's count, an 82px Viewed checkbox), then 20px rows with old and new line numbers in two
   46px gutters, hunk lines on an `accent` tint, added and removed lines on `ansi2` / `ansi1` at
-  `18` alpha, in the terminal font.
+  `18` alpha, in the terminal font. A comment is a card under its line inside the file's card
+  (`background`, 1px `border`, radius 8: `Lines 3–5 · 2m ago`, then the text wrapped to fit);
+  picked lines tint `accent` at `30`; the composer floats 12px above the pane's bottom (radius 10,
+  `accent` border, `shadow_lg`): a title (`Comment on lines 3–5` and the path), an auto-growing
+  textarea (2–8 rows) and Delete / Cancel / Add comment.
 - **Sessions**: rows of title, `time · folder` and tags, led by the agent's mark on a 22×20
   `raised` tile: Claude `#D97757`, Codex `#5B7CFF`, pi `#1F9D8A`, OpenCode in the text colour. The
   header counts sessions per agent as mark + number, only for agents present.
@@ -85,7 +90,18 @@ panel's width. Every button has a hover fill and a darker pressed state.
 - **Diff window**: a tree row scrolls its card to the top and `j` / `k` step through the files;
   a click on a card header folds it, on Viewed marks it viewed and folds it (unmarking unfolds);
   diffs over 800 lines start folded, saying `Large diff · N lines`; Collapse all folds every card.
-  Sideways scrolling moves the code alone: headers and line numbers stay. Esc closes.
+  Sideways scrolling moves the code alone: headers and line numbers stay. Esc closes the window.
+  It reads the changes again when the folder changes and on Refresh, keeping viewed and folded
+  files by `area:path` (a viewed file whose diff changed is unviewed, as on GitHub). Open in a tab
+  closes the window and opens `tab.new { name: "Review · <repo>", mod: "t3-changes", props }` with
+  the same files, viewed and folded.
+- **Comments**: click a line to start one there; shift-click another line of the file for the
+  lines between; the header's comment button comments on the whole file; ⌘↵ adds, Esc cancels,
+  typed text stays when another line is picked. A click on a comment edits it. Send drops a 300px
+  menu: `Send to`, the agents of the shown space (all when it has none; focused first, then the
+  most recent) with tab and status, Copy as text, Delete all comments. Sending pastes one prompt
+  with `hc send` and clears what went; a green `✓ Sent N to <agent>` chip shows for 6s, a click on
+  it focuses that agent.
 - **Sessions**: rescans every 30s and whenever the space or focused terminal changes. A click
   resumes the session in a new tab in its recorded folder; `+` (fades in on hover) adds
   comma-separated tags; clicking a tag filters by it; search takes words and `#tag`s.
@@ -112,7 +128,8 @@ prompt, diff budget and output cleanup; `t3-changes/models.js` lists each CLI's 
 `model/list` paged by a `python3 -c` client; pi `--list-models` plus `~/.pi/agent/settings.json`
 for its default; `opencode models`); `t3-changes/settings.js` draws the dialog, which is
 `t3-changes` itself opened with `openOverlay({ kind: "dialog", props: { settings: true } })`;
-`t3-changes/diff.js` draws the diff window the same way (`kind: "window"`, `key: "t3-diff"`,
+`t3-changes/comments.js` keeps, places, wraps and formats the comments; `t3-changes/diff.js`
+draws the diff window the same way (`kind: "window"`, `key: "t3-diff"`,
 `props: { diff: { root, on, files, focus } }`), reading `git diff --cached` for staged files, `git
 diff` for the rest and untracked files whole. Git actions: stage `add --`, unstage `restore
 --staged --` (`rm --cached` before the first commit), discard `restore --worktree --` or `clean
@@ -124,12 +141,14 @@ marks are `mods/t3-sessions/agents/*.svg` (claude, codex, pi, opencode, cursor, 
 deepseek, generic), used by both mods. Shared state:
 `t3.favorites`, `t3.sessions.tags`, `t3.commit.agent`, `t3.commit.settings` (`{ agents: [{ id,
 name, logo, model, effort, command, off? }], prompt }`, each left out while it matches the
-default), `t3.commit.models` (listings by program: `{ at, models: [{ id, label, detail, efforts }],
+default), `t3.review.comments` (by repository root: `[{ id, path, side: "new" | "old", line, from, code,
+body, at }]`, `line` null for the whole file), `t3.commit.models` (listings by program: `{ at, models: [{ id, label, detail, efforts }],
 default: { label, efforts }, error? }`). Calls: `exec`, `hc send` (cd),
 `run("terminal.open" | "layout.select" | "layout.toggle" | "space.select" | "space.new" | "mod.open")`,
 `setShared`, `pickFolder`, `notify`. Shipped mods relied on: `workspace-status`, and art from
 `workspace-chrome` (spinner, check, square, chevron-down, plus, panel-right, x, git-compare) and `t3-files`
-(file, folder, chevrons); `t3-changes` adds `undo`, `chevron-up` and `chevron-down`.
+(file, folder, chevrons); `t3-changes` adds `undo`, `chevron-up`, `chevron-down`, `rotate-cw`, `app-window`, `message-square`
+and `send`.
 
 ## Watch out
 
@@ -160,6 +179,10 @@ default: { label, efforts }, error? }`). Calls: `exec`, `hc send` (cd),
 - A virtual list's renderer can't register handlers (`on_click`, `tooltip` throw there, and the
   list draws nothing): the diff cards take one `on_item_click` on the list, and the pane's
   `on_mouse_down` notes where the press landed so Viewed and fold tell apart.
+- A sent prompt is one paste: each comment as `File:`, `Line N` / `Lines a–b` (removed lines by the
+  old file's numbers), the quoted lines in a ```diff block (at most 12), then `Comment:`.
+- A mod tab gets its props from `tab.new`, and nothing can change them later: a tab can't be
+  re-pointed, so opening the review again from the panel makes a window, not a second tab.
 - `scroll_to_item(i, "top")` only reveals, at the nearer edge: to put a header at the top, reveal
   the item a pane-height below it first, then the header on the next frame.
 - A card's header must stay in the viewport, so the diff pane doesn't scroll sideways as a whole:
@@ -187,6 +210,10 @@ default: { label, efforts }, error? }`). Calls: `exec`, `hc send` (cd),
   instructions first), and Cancel leaves `t3.commit.settings` as it was.
 - With staged, unstaged and untracked files, Changes shows three sections; Stage on a row moves it
   to Staged, and Commit then commits only that.
+- In the review, clicking line 3 then shift-clicking line 5 and typing ⌘↵ leaves a `Lines 3–5`
+  card under line 5 and `1` on the file's comment button; Send lists the space's agents, and
+  sending to one submits the prompt there and empties `t3.review.comments` for that repository.
+- Open in a tab turns the window into a `Review · <repo>` tab with the same viewed files.
 - Review all changes opens the window with every file as a card; clicking a file in the tree
   brings its card to the top, Viewed folds it and ticks it in the tree, and Esc closes it.
 - Sessions lists Codex rows with the Codex mark and resumes one with `codex resume <id>` in its

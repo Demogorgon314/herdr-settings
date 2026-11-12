@@ -3,7 +3,7 @@ import { v_flex, h_flex, TextareaState, Textarea, Scrollbar, Popup } from "gpui-
 import { spaces, panes, focused, exec, watchFolder, theme, shared, setShared, openOverlay, props } from "herdr";
 import { SETTINGS_KEY, agentsFrom, commandFor, buildPrompt, truncateDiff, cleanMessage } from "./ai.js";
 import { CommitSettings } from "./settings.js";
-import { DiffWindow, READ, AREAS, statusColor, keyOf } from "./diff.js";
+import { DiffWindow, READ, AREAS, statusColor, keyOf, readChanges } from "./diff.js";
 import { discover, modelName, effortLabel } from "./models.js";
 
 function location() {
@@ -37,6 +37,9 @@ export default class Changes extends View {
     this.refresh(cx);
     cx.timer.every(10000, (cx) => this.refresh(cx));
   }
+
+  // A review window or tab stops watching its folder when it goes.
+  async close() { if (this.dialog) this.dialog.gone = true; this.watched = null; }
 
   // Which of the agents' programs are on PATH, looked up again when settings name others.
   probe(bins, cx) {
@@ -79,42 +82,9 @@ export default class Changes extends View {
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
         if (key() !== context) return;
         if (top.code !== 0) { this.root = null; this.files = []; this.error = "Not a git repository"; return; }
-        const root = top.stdout.trim(), git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
-        const status = await git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]);
-        if (status.code !== 0) throw new Error(status.stderr);
-        // Line counts by side: the index against HEAD, the worktree against the index.
-        const [head, cached, worktree] = await Promise.all([
-          git(["rev-parse", "--verify", "HEAD"]),
-          git(["diff", "--cached", "--numstat", "-z", "--no-renames"]),
-          git(["diff", "--numstat", "-z", "--no-renames"]),
-        ]);
-        const stats = (result) => {
-          if (result.code !== 0) throw new Error(result.stderr);
-          const out = {};
-          for (const entry of result.stdout.split("\0")) {
-            const [a, d, ...parts] = entry.split("\t");
-            if (parts.length) out[parts.join("\t")] = { add: Number(a) || 0, del: Number(d) || 0, binary: a === "-" };
-          }
-          return out;
-        };
-        const staged = stats(cached), changed = stats(worktree), none = { add: 0, del: 0 };
-        // Each entry once per section it's in, as editors list them: a file both
-        // staged and edited since shows in Staged and in Changes.
-        const files = [];
-        const entries = status.stdout.split("\0").filter(Boolean);
-        for (const entry of entries.slice(0, 1000)) {
-          const x = entry[0], y = entry[1], path = entry.slice(3);
-          if (x === "?") files.push({ area: "untracked", path, status: "U", ...none });
-          else if (x === "U" || y === "U" || (x === y && (x === "A" || x === "D"))) files.push({ area: "merge", path, status: "C", ...(changed[path] ?? none) });
-          else {
-            if (x !== " ") files.push({ area: "staged", path, status: x === "D" ? "D" : x === "A" ? "A" : "M", ...(staged[path] ?? none) });
-            if (y !== " ") files.push({ area: "changes", path, status: y === "D" ? "D" : "M", ...(changed[path] ?? none) });
-          }
-        }
-        const order = Object.keys(AREAS);
-        files.sort((a, b) => order.indexOf(a.area) - order.indexOf(b.area));
+        const root = top.stdout.trim(), { files, hasHead, limited } = await readChanges({ root, on });
         if (key() !== context) return;
-        this.root = root; this.on = on; this.hasHead = head.code === 0; this.files = files; this.limited = entries.length > 1000; this.error = null;
+        this.root = root; this.on = on; this.hasHead = hasHead; this.files = files; this.limited = limited; this.error = null;
         if (this.viewing && !files.some((f) => keyOf(f) === this.viewing)) this.viewing = null;
         this.watch(root, cx);
       } catch (e) { if (key() === context) this.error = String(e); }
