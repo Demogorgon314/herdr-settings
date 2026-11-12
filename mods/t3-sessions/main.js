@@ -1,18 +1,22 @@
-// Session records for pi, Claude Code, and opencode in this folder (or every
+// Session records for pi, Claude Code, opencode, and Codex in this folder (or every
 // folder): titled from each tool's own records, tagged by hand, resumed in a
 // new terminal with one click.
-import { View, div } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { spaces, panes, focused, exec, theme, home, run, shared, setShared, notify } from "herdr";
 
 const TAGS = "t3.sessions.tags";
 const FADE = { duration: 140, easing: "ease-out" };
-const PI = "pi", CC = "cc", OC = "oc";
+const PI = "pi", CC = "cc", OC = "oc", CX = "codex";
+// Marks and brand colours after HarnessTrajectory; opencode's mark is monochrome,
+// so it takes the theme's text colour (null) to stay visible in dark themes.
 const AGENTS = {
-  [PI]: { label: "pi", color: "ansi5", argv: ["pi", "--session"] },
-  [CC]: { label: "cc", color: "ansi3", argv: ["claude", "--resume"] },
-  [OC]: { label: "oc", color: "ansi4", argv: ["opencode"] },
+  [PI]: { name: "pi", icon: "mods/t3-sessions/agents/pi.svg", color: "#1F9D8A", argv: ["pi", "--session"] },
+  [CC]: { name: "Claude Code", icon: "mods/t3-sessions/agents/claude.svg", color: "#D97757", argv: ["claude", "--resume"] },
+  [OC]: { name: "OpenCode", icon: "mods/t3-sessions/agents/opencode.svg", color: null, argv: ["opencode"] },
+  [CX]: { name: "Codex", icon: "mods/t3-sessions/agents/codex.svg", color: "#5B7CFF", argv: ["codex", "resume"] },
 };
+const mark = (agent, t, size) => svg(agent.icon).size(size).flex_none().text_color(agent.color ?? t.foreground);
 
 function location() {
   const space = spaces().find(s => s.active), f = focused();
@@ -38,12 +42,12 @@ function projectRoot() {
   return space?.folder || pane?.cwd || f?.cwd || "";
 }
 
-// One Python pass for both file-based tools: id, cwd, mtime, and the title.
+// One Python pass for the file-based tools: id, cwd, mtime, and the title.
 // pi's own display name (set by renaming a session) wins over its first user
 // message, and pi's real session id lives in the file's first JSONL line — the
 // filename's `<timestamp>_<id>` prefix is not something `pi --session` accepts.
 const SCAN = String.raw`
-import json, glob, os
+import json, glob, os, re
 def text_of(content):
     if isinstance(content, str): return content
     parts = []
@@ -89,6 +93,71 @@ def session_name(path):
                 if o.get("type") == "session_info" and o.get("name"): name = o["name"]
     except Exception: pass
     return name
+# Codex's per-item provenance wins; older files use known context markers.
+# Keep arbitrary XML-shaped human prompts, as HarnessTrajectory does.
+def codex_human(text):
+    t = text.strip()
+    lower = t.lower()
+    markers = [
+        ("# AGENTS.md instructions", "</INSTRUCTIONS>"),
+        ("<environment_context>", "</environment_context>"),
+        ("<user_instructions>", "</user_instructions>"),
+        ("<skill>", "</skill>"), ("<user_shell_command>", "</user_shell_command>"),
+        ("<turn_aborted>", "</turn_aborted>"), ("<subagent_notification>", "</subagent_notification>"),
+        ("<recommended_plugins>", "</recommended_plugins>"), ("<goal_context>", "</goal_context>"),
+    ]
+    if any(lower.startswith(a.lower()) and lower.endswith(b.lower()) for a, b in markers): return False
+    if re.match(r'<codex_internal_context source="[a-z][a-z0-9_]*">', t) and t.endswith("</codex_internal_context>"): return False
+    external = re.match(r'<external_([A-Za-z0-9_-]+)>', t)
+    if external and t.endswith("</external_" + external[1] + ">"): return False
+    if re.match(r'<hook_prompt\b[^>]*\bhook_run_id="[^"]+"', t) and t.endswith("</hook_prompt>"): return False
+    prefixes = [
+        "Warning: Your account was flagged for potentially high-risk cyber activity",
+        "Warning: The maximum number of unified exec processes you can keep open is",
+        "The following is the Codex agent history", "The Codex agent has requested the following",
+        "Assess the exact planned action below", "Planned action JSON:",
+        "Reviewed Codex session id:", "Some conversation entries were omitted.",
+    ]
+    if any(t.startswith(p) for p in prefixes): return False
+    if t.startswith("Warning: apply_patch was requested via ") and t.endswith("Use the apply_patch tool instead of exec_command."): return False
+    return not (re.fullmatch(r'>>> (?:TRANSCRIPT (?:DELTA )?(?:START|END)|APPROVAL REQUEST (?:START|END))\s*', t) or re.match(r'\[\d+\] (?:user|assistant|tool)\b', t))
+def codex_first_user(path):
+    try:
+        with open(path, "rb") as f:
+            # Bound fallback work for empty/large rollouts; named threads need no probe.
+            remaining = 1024 * 1024
+            while remaining > 0:
+                line = f.readline(remaining)
+                if not line: break
+                remaining -= len(line)
+                if b'"response_item"' not in line: continue
+                try: o = json.loads(line)
+                except Exception: continue
+                msg = o.get("payload") or {}
+                if o.get("type") != "response_item" or msg.get("role") != "user": continue
+                content = msg.get("content") or []
+                kinds = (msg.get("internal_chat_message_metadata_passthrough") or {}).get("content_item_kinds") or []
+                annotated = len(kinds) > 0 and len(kinds) == len(content)
+                parts = []
+                for i, part in enumerate(content):
+                    if not isinstance(part, dict): continue
+                    text = part.get("text") or ""
+                    kind = kinds[i] if annotated and isinstance(kinds[i], str) else ""
+                    human = (kind.startswith("user.") or kind in ("", "unknown", "images.preparation_error", "images.unsupported", "audio.unsupported")) if annotated else (part.get("type") != "input_text" or codex_human(text))
+                    if human and text.strip(): parts.append(text)
+                if parts: return " ".join(parts)
+    except (OSError, ValueError): pass
+    return ""
+def codex_names():
+    names = {}
+    try:
+        with open(os.path.expanduser("~/.codex/session_index.jsonl"), encoding="utf-8") as f:
+            for line in f:
+                try: o = json.loads(line)
+                except ValueError: continue
+                if isinstance(o, dict) and o.get("id"): names[o["id"]] = o.get("thread_name") or ""
+    except OSError: pass
+    return names
 def row(agent, ident, cwd, path, title):
     return {"agent": agent, "id": ident, "file": os.path.basename(path), "cwd": cwd or "", "mtime": int(os.path.getmtime(path) * 1000), "title": " ".join((title or "").split())[:200]}
 out = []
@@ -99,6 +168,22 @@ for path in glob.glob(os.path.expanduser("~/.pi/agent/sessions/*/*.jsonl")):
 for path in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
     head = read_first(path)
     out.append(row("cc", os.path.basename(path).replace(".jsonl", ""), head.get("cwd") or first_cwd(path), path, first_user(path)))
+names = codex_names()
+codex = {}
+for path in glob.glob(os.path.expanduser("~/.codex/sessions/*/*/*/rollout-*.jsonl")):
+    head = read_first(path)
+    if not isinstance(head, dict) or head.get("type") != "session_meta": continue
+    meta = head.get("payload") or {}
+    ident = meta.get("id")
+    source = meta.get("source")
+    # Exec runs and user forks are resumable; delegated children belong to their parent.
+    if not ident or meta.get("parent_thread_id") or (isinstance(source, dict) and "subagent" in source) or meta.get("thread_source") == "subagent" or source == "subagent": continue
+    try:
+        item = row("codex", ident, meta.get("cwd"), path, names.get(ident) or codex_first_user(path))
+    except OSError: continue
+    # Reverts may leave multiple rollouts for one thread; resume its newest head.
+    if ident not in codex or item["mtime"] > codex[ident]["mtime"]: codex[ident] = item
+out.extend(codex.values())
 print(json.dumps(out))
 `;
 
@@ -114,7 +199,7 @@ export default class Sessions extends View {
   init(_props, cx) {
     this.sessions = []; this.error = null; this.loading = false;
     this.scope = "current"; this.tagOnly = null; this.filter = ""; this.tagging = null;
-    this.input = InputState.new({ placeholder: "Search titles and paths, #tag filters by tag" });
+    this.input = InputState.new({ placeholder: "Search or #tag" });
     this.input.on("change", (_e, cx) => { this.filter = this.input.value(); cx.notify(); });
     this.refresh(cx);
     cx.timer.every(30000, cx => this.refresh(cx));
@@ -252,7 +337,7 @@ export default class Sessions extends View {
       .when(!tagging, el => el.cursor_pointer().hover(s => s.bg(t.hover)).active(s => s.bg(t.selected)).on_click(() => this.resume(session)))
       .when(tagging, el => el.bg(t.selected))
       .child(h_flex().w_full().min_w(0).gap(7).items_center()
-        .child(div().id(`agent-${i}`).min_w(22).h(15).px(3).flex_none().flex().items_center().justify_center().rounded(4).bg(t.raised).text_size(9).text_color(t[agent.color]).child(agent.label))
+        .child(div().id(`agent-${i}`).w(22).h(20).flex_none().flex().items_center().justify_center().rounded(5).bg(t.raised).tooltip(agent.name).child(mark(agent, t, 13)))
         .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(session.title || "(untitled)"))
         .when(!tagging, el => el.child(div().id(`tag-add-${i}`).size(18).flex_none().flex().items_center().justify_center().rounded(4).text_size(12).text_color(t.dim)
           .opacity(hovered ? 1 : 0).transition("opacity", FADE).tooltip("Add tags")
@@ -278,7 +363,7 @@ export default class Sessions extends View {
     const t = theme(), h = home(), root = projectRoot();
     const short = (p) => p && h && p.startsWith(h) ? "~" + p.slice(h.length) : p ?? "";
     const list = this.visible(root);
-    const counts = { [PI]: 0, [CC]: 0, [OC]: 0 };
+    const counts = { [PI]: 0, [CC]: 0, [OC]: 0, [CX]: 0 };
     for (const s of list) counts[s.agent]++;
     return v_flex().id("sessions").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
@@ -292,7 +377,10 @@ export default class Sessions extends View {
             .on_click(() => { this.tagOnly = null; cx.notify(); }).child("✕")))))
       .child(h_flex().h(30).flex_none().px(10).gap(8).items_center().border_b(1).border_color(t.border)
         .child(Input.new(this.input).flex_1().h_full().text_size(12).text_color(t.foreground))
-        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(`pi ${counts[PI]} · cc ${counts[CC]} · oc ${counts[OC]}`)))
+        // Only the agents with sessions here, each as its mark and count.
+        .child(h_flex().flex_none().gap(8).items_center().text_size(10.5).text_color(t.dim)
+          .children(Object.entries(counts).filter(([, n]) => n > 0).map(([kind, n]) => h_flex().id(`count-${kind}`).gap(3).items_center()
+            .tooltip(`${n} ${AGENTS[kind].name} session${n === 1 ? "" : "s"}`).child(mark(AGENTS[kind], t, 11)).child(String(n))))))
       .child(v_flex().id("session-list").flex_1().min_h(0).p(6).gap(2).overflow_y_scroll()
         .children(list.map((s, i) => this.row(s, i, t, short, root))))
       .when(!list.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading sessions…" : !root ? "This space has no folder" : this.filter.trim().startsWith("#") ? "No session has this tag (add tags with + on a row)" : "No sessions in this project"))));

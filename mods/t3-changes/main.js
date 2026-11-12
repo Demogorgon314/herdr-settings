@@ -283,7 +283,7 @@ export default class Changes extends View {
         .hover((s) => s.bg(t.hover).text_color(t.foreground)).active((s) => s.bg(t.selected))
         .tooltip("Agent that writes commit messages")
         .on_click((_e, cx) => { this.picking = !this.picking; cx.notify(); })
-        .child(svg("mods/t3-changes/sparkles.svg").size(12).flex_none().text_color(t.accent))
+        .child(svg(agent.icon).size(12).flex_none().text_color(agent.color ?? t.foreground))
         .child(this.gen
           ? div().loop("opacity", { from: 0.45, to: 1, period: 1400 }).child(`${this.gen.agent.label} is writing…`)
           : div().child(name))
@@ -300,9 +300,10 @@ export default class Changes extends View {
             .text_color(here ? t.foreground : t.dim)
             .when(here, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected))
               .on_click((_e, cx) => { setShared(AGENT_KEY, a.id); this.picking = false; cx.notify(); }))
-            .child(div().w(12).flex_none().child(on ? svg("mods/workspace-chrome/check.svg").size(12).text_color(t.accent) : div()))
+            .child(svg(a.icon).size(13).flex_none().text_color(here ? a.color ?? t.foreground : t.dim))
             .child(div().flex_1().min_w(0).truncate().child(a.label))
-            .child(div().flex_none().text_size(11).text_color(t.dim).child(here ? a.model ?? "" : "not installed"));
+            .child(div().flex_none().text_size(11).text_color(t.dim).child(here ? a.model ?? "" : "not installed"))
+            .child(div().w(12).flex_none().child(on ? svg("mods/workspace-chrome/check.svg").size(12).text_color(t.accent) : div()));
         })));
   }
 

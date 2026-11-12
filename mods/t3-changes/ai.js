@@ -2,17 +2,19 @@
 // each agent run as a one-shot, read-only CLI with the prompt on stdin.
 
 // Every run is isolated: no session saved, no hooks, tools, skills or project
-// context files, so it only reads the prompt and answers.
+// context files, so it only reads the prompt and answers. Marks and colours are
+// t3-sessions' (after HarnessTrajectory); null takes the theme's text colour.
+const MARK = (name) => `mods/t3-sessions/agents/${name}.svg`;
 export const AGENTS = [
-  { id: "claude-haiku", label: "Claude", model: "Haiku", bin: "claude",
+  { id: "claude-haiku", label: "Claude", model: "Haiku", bin: "claude", icon: MARK("claude"), color: "#D97757",
     args: ["-p", "--output-format", "text", "--model", "haiku", "--tools", "", "--strict-mcp-config", "--settings", '{"disableAllHooks":true}'] },
-  { id: "claude-sonnet", label: "Claude", model: "Sonnet", bin: "claude",
+  { id: "claude-sonnet", label: "Claude", model: "Sonnet", bin: "claude", icon: MARK("claude"), color: "#D97757",
     args: ["-p", "--output-format", "text", "--model", "sonnet", "--effort", "low", "--tools", "", "--strict-mcp-config", "--settings", '{"disableAllHooks":true}'] },
-  { id: "codex", label: "Codex", bin: "codex",
+  { id: "codex", label: "Codex", bin: "codex", icon: MARK("codex"), color: "#5B7CFF",
     args: ["exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only", "-c", "model_reasoning_effort=low"] },
-  { id: "pi", label: "pi", bin: "pi",
+  { id: "pi", label: "pi", bin: "pi", icon: MARK("pi"), color: "#1F9D8A",
     args: ["--print", "--no-session", "--no-tools", "--no-skills", "--no-extensions", "--no-context-files", "--mode", "text"] },
-  { id: "opencode", label: "opencode", bin: "opencode", args: ["run"] },
+  { id: "opencode", label: "OpenCode", bin: "opencode", icon: MARK("opencode"), color: null, args: ["run"] },
 ];
 
 export function buildPrompt({ diff, recent, fresh }) {
