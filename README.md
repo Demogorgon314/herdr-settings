@@ -22,7 +22,7 @@ blurred.
 | `mods/t3-pane` | Pane header: program icon, title, folder, status; split, zoom and close |
 | `mods/t3-tools-nav` | Segmented switch over the tools panel, with a sliding pill; icons only under 326px |
 | `mods/t3-files` | Clone of Herdr's `files`; hovering a row fades in Favorite, `cd` here, and Copy path |
-| `mods/t3-changes` | Clone of Herdr's `changes` with an [Orca](https://github.com/stablyai/orca)-style commit box: multi-line message (⌘↵ commits), ✨ asks an agent of your choice to write it; agents and prompt are set in its Settings dialog |
+| `mods/t3-changes` | Clone of Herdr's `changes`: files in Staged / Changes / Untracked sections with stage, unstage and discard on hover; a GitHub-style review window for the diffs; an [Orca](https://github.com/stablyai/orca)-style commit box where ✨ asks an agent of your choice to write the message |
 | `mods/t3-sessions` | pi, Claude Code, OpenCode and Codex sessions recorded in the current space's folder; click to resume, `+` to tag, `#tag` to filter |
 | `mods/t3-favorites` | Saved folders; click to switch to that space (or open one) |
 | `keys.json` | Only the `layout:herdr-t3` section: `cmd-shift-b` switches the sidebar, `cmd-shift-a` the one-agent view |
@@ -60,6 +60,17 @@ A missing program only turns off its own feature.
 | `python3` | Scanning session files for Sessions |
 | `sqlite3` | Reading OpenCode's session database |
 | `claude`, `codex`, `pi`, `opencode` | Resuming their sessions; writing commit messages (pick one in Changes) |
+
+## Changes and review
+
+Changes lists the files the way editors do, in Merge, Staged, Changes and Untracked sections.
+Hover a row for Discard (click twice), Stage or Unstage, or a section header for Stage all /
+Unstage all. Commit (⌘↵) commits what is staged, or everything when nothing is.
+
+Clicking a file, or the review icon in the header (Review all changes), opens a window laid out like GitHub's "Files
+changed": the changed files as a tree on the left, every diff on the right as a card with old and
+new line numbers. Click a file in the tree (or press `j` / `k`) to go to it, a card's header to
+fold it, and **Viewed** to tick it off and fold it. Diffs over 800 lines start folded. Esc closes.
 
 ## AI commit messages
 

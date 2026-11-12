@@ -28,8 +28,20 @@ text 11–13px.
 - **Tools switch**: four equal segments (Files, Changes, Sessions, Favorites) on a 30px `raised`
   track; labels show from 326px of track, icons only below.
 - **Files**: the focused pane's folder as a lazy tree with git marks (A, M, D, U).
-- **Changes**: under its header, a multi-line message box (2–8 rows) with ✨ in its corner, an agent
-  chip and a 24px Commit button; then the changed files; then the diff.
+- **Changes**: a header (`N files`, `+a −d`, and a Review all changes icon), a multi-line message
+  box (2–8 rows) with ✨ in its corner, an agent chip and a 24px Commit button; then the changed
+  files in folding sections as editors draw them: Merge, Staged, Changes, Untracked, each an
+  uppercase label with a count pill. A 26px row is a file icon in its status colour (added and
+  untracked `ansi2`, deleted and conflicted `ansi1`, modified `ansi3`), the name, its folder
+  dimmed, `+a −d` and the status letter. With nothing changed, an icon in a circle over a title
+  and a line of detail.
+- **Diff window**: GitHub's "Files changed" in a 1040×760 window: a 44px title bar (`Changes`,
+  file count, `+a −d`, `x / N viewed`, Collapse all, ✕), a 260px tree of the files under their
+  sections (one-child folders squashed to `src/lib`, a ✓ on viewed files) and the diffs stacked as
+  cards: a 34px `raised` header (fold chevron, status, folder dimmed and name bold, a section
+  badge, `+a −d`, an 82px Viewed checkbox), then 20px rows with old and new line numbers in two
+  46px gutters, hunk lines on an `accent` tint, added and removed lines on `ansi2` / `ansi1` at
+  `18` alpha, in the terminal font.
 - **Sessions**: rows of title, `time · folder` and tags, led by the agent's mark on a 22×20
   `raised` tile: Claude `#D97757`, Codex `#5B7CFF`, pi `#1F9D8A`, OpenCode in the text colour. The
   header counts sessions per agent as mark + number, only for agents present.
@@ -62,8 +74,18 @@ panel's width. Every button has a hover fill and a darker pressed state.
   then its command in a mono input, and a note when its program is missing or a choice has no
   placeholder to go to), then a full-width 36px dashed Add agent slot (accent border and text on
   hover); the prompt's instructions in a mono textarea. Restore defaults and Reset to default sit
-  at the right of their section titles, fading in once something differs. Cancel or Esc drops the edits; Save or ⌘↵ stores them. ⌘↵ or Commit stages everything and commits; a green
+  at the right of their section titles, fading in once something differs. Cancel or Esc drops the
+  edits; Save or ⌘↵ stores them. ⌘↵ or Commit commits what is staged, or stages everything first
+  when nothing is; ✨ writes about the same (the staged diff, else everything). A green
   `✓ Committed <hash>` banner folds open under the button for 2.2s.
+- **Changed files**: a section header folds its section (height, 180ms) and fades in Stage all or
+  Unstage all on hover. Hovering a row swaps its counts for Discard (the first click turns it red,
+  a second within 3s discards), Stage or Unstage. Clicking a row, or Review all changes, opens the diff window
+  on that file; opening it again replaces it.
+- **Diff window**: a tree row scrolls its card to the top and `j` / `k` step through the files;
+  a click on a card header folds it, on Viewed marks it viewed and folds it (unmarking unfolds);
+  diffs over 800 lines start folded, saying `Large diff · N lines`; Collapse all folds every card.
+  Sideways scrolling moves the code alone: headers and line numbers stay. Esc closes.
 - **Sessions**: rescans every 30s and whenever the space or focused terminal changes. A click
   resumes the session in a new tab in its recorded folder; `+` (fades in on hover) adds
   comma-separated tags; clicking a tag filters by it; search takes words and `#tag`s.
@@ -89,7 +111,12 @@ prompt, diff budget and output cleanup; `t3-changes/models.js` lists each CLI's 
 `-p --input-format stream-json` with a `list_models` control request; Codex `app-server`
 `model/list` paged by a `python3 -c` client; pi `--list-models` plus `~/.pi/agent/settings.json`
 for its default; `opencode models`); `t3-changes/settings.js` draws the dialog, which is
-`t3-changes` itself opened with `openOverlay({ kind: "dialog", props: { settings: true } })`.
+`t3-changes` itself opened with `openOverlay({ kind: "dialog", props: { settings: true } })`;
+`t3-changes/diff.js` draws the diff window the same way (`kind: "window"`, `key: "t3-diff"`,
+`props: { diff: { root, on, files, focus } }`), reading `git diff --cached` for staged files, `git
+diff` for the rest and untracked files whole. Git actions: stage `add --`, unstage `restore
+--staged --` (`rm --cached` before the first commit), discard `restore --worktree --` or `clean
+-f` for an untracked file.
 `t3-sessions` scans with one `python3 -c` pass (pi `~/.pi/agent/sessions/*/*.jsonl`, Claude
 `~/.claude/projects/*/*.jsonl`, Codex `~/.codex/sessions/*/*/*/rollout-*.jsonl` titled from
 `~/.codex/session_index.jsonl`) plus `sqlite3` on `~/.local/share/opencode/opencode.db`. Agent
@@ -101,7 +128,8 @@ default), `t3.commit.models` (listings by program: `{ at, models: [{ id, label, 
 default: { label, efforts }, error? }`). Calls: `exec`, `hc send` (cd),
 `run("terminal.open" | "layout.select" | "layout.toggle" | "space.select" | "space.new" | "mod.open")`,
 `setShared`, `pickFolder`, `notify`. Shipped mods relied on: `workspace-status`, and art from
-`workspace-chrome` (spinner, check, square, chevron-down, plus, panel-right).
+`workspace-chrome` (spinner, check, square, chevron-down, plus, panel-right, x, git-compare) and `t3-files`
+(file, folder, chevrons); `t3-changes` adds `undo`, `chevron-up` and `chevron-down`.
 
 ## Watch out
 
@@ -129,6 +157,13 @@ default: { label, efforts }, error? }`). Calls: `exec`, `hc send` (cd),
 - `codex app-server` doesn't exit after answering: a listing client reads until the last page,
   then kills it. Its listing can take 5–10s (it refreshes models online first), so listings are
   kept for a day and only made when the menu or dialog opens.
+- A virtual list's renderer can't register handlers (`on_click`, `tooltip` throw there, and the
+  list draws nothing): the diff cards take one `on_item_click` on the list, and the pane's
+  `on_mouse_down` notes where the press landed so Viewed and fold tell apart.
+- `scroll_to_item(i, "top")` only reveals, at the nearer edge: to put a header at the top, reveal
+  the item a pane-height below it first, then the header on the next frame.
+- A card's header must stay in the viewport, so the diff pane doesn't scroll sideways as a whole:
+  `on_scroll_wheel` moves an offset (`ml(-x)`) on each row's code cell instead.
 - Codex user prompts start with injected context (AGENTS.md, `<environment_context>`…): skip it for
   titles; leave out delegated sub-agent rollouts; collapse a thread's rollouts to the newest.
 - A panel is not re-rendered when the space or focus changes: Sessions watches `where()` on a 500ms
@@ -150,6 +185,10 @@ default: { label, efforts }, error? }`). Calls: `exec`, `hc send` (cd),
   Codex's Effort for GPT-6-Luna offers Low to Max, switching an agent off drops it from the menu, a
   picked logo and model show on the chip (`Claude · Haiku`), pi's chip names its configured model, an added `cat` agent fills the box with the prompt itself (your
   instructions first), and Cancel leaves `t3.commit.settings` as it was.
+- With staged, unstaged and untracked files, Changes shows three sections; Stage on a row moves it
+  to Staged, and Commit then commits only that.
+- Review all changes opens the window with every file as a card; clicking a file in the tree
+  brings its card to the top, Viewed folds it and ticks it in the tree, and Esc closes it.
 - Sessions lists Codex rows with the Codex mark and resumes one with `codex resume <id>` in its
   folder; `#tag` narrows the list.
 - Favorites' Add current saves the space's folder and a click switches to that space.

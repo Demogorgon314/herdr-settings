@@ -1,8 +1,9 @@
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, TextareaState, Textarea, Scrollbar, v_virtual_list, Popup } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, shared, setShared, openOverlay, props } from "herdr";
+import { v_flex, h_flex, TextareaState, Textarea, Scrollbar, Popup } from "gpui-base";
+import { spaces, panes, focused, exec, watchFolder, theme, shared, setShared, openOverlay, props } from "herdr";
 import { SETTINGS_KEY, agentsFrom, commandFor, buildPrompt, truncateDiff, cleanMessage } from "./ai.js";
 import { CommitSettings } from "./settings.js";
+import { DiffWindow, READ, AREAS, statusColor, keyOf } from "./diff.js";
 import { discover, modelName, effortLabel } from "./models.js";
 
 function location() {
@@ -12,34 +13,16 @@ function location() {
   return { cwd: pane?.cwd || f?.cwd || space?.folder, on };
 }
 const key = () => JSON.stringify(location());
-// Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie):
-// the folder watch would see it, and every refresh would start the next one.
-const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 const AGENT_KEY = "t3.commit.agent";
 const FADE = { duration: 140, easing: "ease-out" }, OPEN = { duration: 180, easing: "ease-out" };
-const countLines = (text) => text ? text.split("\n").length - Number(text.endsWith("\n")) : 0;
-
-// Text draws a tab as nothing: pad each to the next 4-column stop.
-const untab = (text) => text.replace(/[^\t]*\t/g, (s) => s.slice(0, -1).padEnd((s.length - 1) - (s.length - 1) % 4 + 4));
-
-// Numbers each diff line once, so a frame only draws the rows on screen.
-function diffRows(lines) {
-  let old = 0, next = 0;
-  return lines.map((line) => {
-    const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
-    if (match) { old = +match[1]; next = +match[2]; return { kind: "@", text: line }; }
-    const kind = line[0];
-    if (kind === "-") return { kind, number: old++, text: untab(line.slice(1)) || " " };
-    if (kind === "+") return { kind, number: next++, text: untab(line.slice(1)) || " " };
-    if (kind === " ") { old++; return { kind, number: next++, text: untab(line.slice(1)) || " " }; }
-    return { kind: "", text: line };
-  });
-}
+const FILE_ROW = 26;
+const paths = (files) => [...new Set(files.map((f) => f.path))];
 
 export default class Changes extends View {
   init(_props, cx) {
     if (props()?.settings) { this.dialog = new CommitSettings(cx); return; }
-    this.files = []; this.rows = []; this.diffWidth = 0; this.message = ""; this.handle = cx.focus_handle();
+    if (props()?.diff) { this.dialog = new DiffWindow(cx); return; }
+    this.files = []; this.collapsed = new Set(); this.message = ""; this.handle = cx.focus_handle();
     this.gen = null; this.picking = false; this.installed = null;
     this.input = TextareaState.new({ placeholder: "Commit message (⌘↵ to commit)" });
     this.input.set_auto_grow(2, 8);
@@ -82,103 +65,114 @@ export default class Changes extends View {
   }
 
   refresh(cx) {
-    if (this.loading || this.busy) return;
+    // A refresh asked for while one runs (after a stage, say) runs when it ends.
+    if (this.loading || this.busy) { this.again = true; return; }
     const { cwd, on } = location(), context = key();
     if (context !== this.context) {
-      this.context = context; this.root = null; this.files = []; this.open = null;
-      this.setLines([]); this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.watched = null; this.closed = false; this.limited = false;
+      this.context = context; this.root = null; this.files = []; this.viewing = null;
+      this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.watched = null; this.limited = false;
     }
     if (!cwd) return;
-    this.loading = true;
+    this.loading = true; this.again = false;
     cx.spawn(async (cx) => {
       try {
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
         if (key() !== context) return;
-        if (top.code !== 0) { this.root = null; this.files = []; this.setLines([]); this.open = null; this.error = "Not a git repository"; return; }
+        if (top.code !== 0) { this.root = null; this.files = []; this.error = "Not a git repository"; return; }
         const root = top.stdout.trim(), git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
         const status = await git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]);
         if (status.code !== 0) throw new Error(status.stderr);
-        const head = await git(["rev-parse", "--verify", "HEAD"]);
-        const stats = {};
-        const results = head.code === 0 ? [await git(["diff", "HEAD", "--numstat", "-z", "--no-renames"])] : [await git(["diff", "--cached", "--numstat", "-z", "--no-renames"]), await git(["diff", "--numstat", "-z", "--no-renames"])];
-        for (const result of results) {
+        // Line counts by side: the index against HEAD, the worktree against the index.
+        const [head, cached, worktree] = await Promise.all([
+          git(["rev-parse", "--verify", "HEAD"]),
+          git(["diff", "--cached", "--numstat", "-z", "--no-renames"]),
+          git(["diff", "--numstat", "-z", "--no-renames"]),
+        ]);
+        const stats = (result) => {
           if (result.code !== 0) throw new Error(result.stderr);
+          const out = {};
           for (const entry of result.stdout.split("\0")) {
             const [a, d, ...parts] = entry.split("\t");
-            if (!parts.length) continue;
-            const path = parts.join("\t"), old = stats[path] ?? { add: 0, del: 0 };
-            stats[path] = { add: old.add + (Number(a) || 0), del: old.del + (Number(d) || 0), binary: a === "-" };
+            if (parts.length) out[parts.join("\t")] = { add: Number(a) || 0, del: Number(d) || 0, binary: a === "-" };
           }
-        }
+          return out;
+        };
+        const staged = stats(cached), changed = stats(worktree), none = { add: 0, del: 0 };
+        // Each entry once per section it's in, as editors list them: a file both
+        // staged and edited since shows in Staged and in Changes.
         const files = [];
         const entries = status.stdout.split("\0").filter(Boolean);
         for (const entry of entries.slice(0, 1000)) {
-          const xy = entry.slice(0, 2), path = entry.slice(3), fresh = xy === "??";
-          const conflict = xy.includes("U") || xy === "AA" || xy === "DD";
-          const s = conflict ? "U" : xy.includes("D") ? "D" : fresh || xy.includes("A") ? "A" : "M";
-          const stat = stats[path] ?? { add: 0, del: 0 };
-          files.push({ path, status: s, fresh, ...stat });
+          const x = entry[0], y = entry[1], path = entry.slice(3);
+          if (x === "?") files.push({ area: "untracked", path, status: "U", ...none });
+          else if (x === "U" || y === "U" || (x === y && (x === "A" || x === "D"))) files.push({ area: "merge", path, status: "C", ...(changed[path] ?? none) });
+          else {
+            if (x !== " ") files.push({ area: "staged", path, status: x === "D" ? "D" : x === "A" ? "A" : "M", ...(staged[path] ?? none) });
+            if (y !== " ") files.push({ area: "changes", path, status: y === "D" ? "D" : "M", ...(changed[path] ?? none) });
+          }
         }
+        const order = Object.keys(AREAS);
+        files.sort((a, b) => order.indexOf(a.area) - order.indexOf(b.area));
         if (key() !== context) return;
         this.root = root; this.on = on; this.hasHead = head.code === 0; this.files = files; this.limited = entries.length > 1000; this.error = null;
+        if (this.viewing && !files.some((f) => keyOf(f) === this.viewing)) this.viewing = null;
         this.watch(root, cx);
-        if (this.open && !files.some((f) => f.path === this.open)) { this.open = null; this.setLines([]); }
-        // The first file's diff shows until you pick another.
-        if (!this.open && !this.closed && files.length) this.open = files[0].path;
-        if (this.open) {
-          try { await this.load(this.open, context); }
-          catch { if (key() === context) this.setLines(["Cannot preview this diff (too large or unreadable)"]); }
-        }
       } catch (e) { if (key() === context) this.error = String(e); }
-      finally { this.loading = false; cx.notify(); }
+      finally { this.loading = false; if (this.again) this.refresh(cx); cx.notify(); }
     });
   }
 
-  async load(path, context) {
-    const file = this.files.find((f) => f.path === path), root = this.root, on = this.on;
-    if (!file) return;
-    let lines;
-    if (file.fresh || (!this.hasHead && file.status === "A")) {
-      const text = await readTextFile(`${root}/${path}`, { on }).catch(() => null);
-      if (text === null) lines = ["Cannot preview this file (binary, too large, or unreadable)"];
-      else if (text.includes("\0")) lines = ["Binary file · no text diff"];
-      else {
-        file.add = countLines(text);
-        lines = [`@@ -0,0 +1,${file.add} @@`, ...text.slice(0, 400000).replace(/\n$/, "").split("\n").slice(0, 1500).map(l => `+${l}`)];
-      }
-    } else {
-      const r = await exec("git", [...READ, "diff", ...(this.hasHead ? ["HEAD"] : []), "--no-ext-diff", "--no-textconv", "--no-color", "--", path], { cwd: root, on });
-      if (r.code !== 0) throw new Error(r.stderr);
-      const all = r.stdout.replace(/\n$/, "").split("\n"), first = all.findIndex((l) => l.startsWith("@@"));
-      lines = first < 0 ? [file.binary ? "Binary file changed" : "No text diff available"] : all.slice(first);
-    }
-    if (key() === context && this.open === path) this.setLines(lines.slice(0, 1500).map(line => line.length > 4000 ? line.slice(0, 4000) + "… (line truncated)" : line));
-  }
-
-  setLines(lines) {
-    this.rows = diffRows(lines);
-    this.diffWidth = Math.max(300, ...this.rows.map(row => (row.text.length + 1) * 7 + 50));
-  }
-
-  pick(path, cx) {
-    this.open = this.open === path ? null : path; this.setLines([]); this.note = null;
-    this.closed = !this.open;
-    const context = this.context;
-    if (this.open) cx.spawn(async (cx) => {
-      try { await this.load(path, context); }
-      catch (e) { if (key() === context && this.open === path) this.note = `Cannot preview this diff (too large or unreadable): ${e}`; }
-      cx.notify();
-    });
+  // The changes as GitHub's "Files changed" shows them, in a window, at this file.
+  openDiff(file, cx) {
+    if (!this.root || !this.files.length) return;
+    this.viewing = file ? keyOf(file) : null;
+    const files = this.files.map(({ area, path, status, add, del, binary }) => ({ area, path, status, add, del, binary }));
+    openOverlay({ mod: "t3-changes", kind: "window", key: "t3-diff", width: 1040, height: 760,
+      props: { diff: { root: this.root, on: this.on, files, focus: file ? this.files.indexOf(file) : 0 } } });
     cx.notify();
+  }
+
+  // Runs git steps on entries, then reads the status again.
+  git(steps, cx) {
+    const root = this.root, on = this.on, context = this.context;
+    if (!root || this.busy) return;
+    this.note = null;
+    cx.spawn(async (cx) => {
+      try {
+        for (const args of steps) {
+          const r = await exec("git", args, { cwd: root, on });
+          if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
+        }
+      } catch (e) { if (key() === context) this.note = `git: ${e.message ?? e}`; }
+      this.refresh(cx); cx.notify();
+    });
+  }
+
+  stage(files, cx) { this.git([["add", "--", ...paths(files)]], cx); }
+  unstage(files, cx) { this.git([this.hasHead ? ["restore", "--staged", "--", ...paths(files)] : ["rm", "--cached", "-q", "--", ...paths(files)]], cx); }
+
+  // Discarding loses work: the first click arms the button (red), a second
+  // within three seconds discards. An untracked file is deleted.
+  discard(file, cx) {
+    const k = keyOf(file);
+    if (this.confirm !== k) {
+      this.confirm = k; cx.notify();
+      cx.timer.after(3000, (cx) => { if (this.confirm === k) { this.confirm = null; cx.notify(); } });
+      return;
+    }
+    this.confirm = null;
+    this.git([file.area === "untracked" ? ["clean", "-f", "-q", "--", file.path] : ["restore", "--worktree", "--", file.path]], cx);
   }
 
   commit(cx) {
     if (!this.message.trim() || !this.root || this.busy || this.loading || this.context !== key()) return;
     const root = this.root, on = this.on, context = this.context, message = this.message.trim();
+    // With anything staged only that is committed; otherwise everything, as editors do.
+    const steps = this.files.some((f) => f.area === "staged") ? [["commit", "-m", message]] : [["add", "-A"], ["commit", "-m", message]];
     this.busy = true; this.note = null;
     cx.spawn(async (cx) => {
       try {
-        for (const args of [["add", "-A"], ["commit", "-m", message]]) {
+        for (const args of steps) {
           const r = await exec("git", args, { cwd: root, on });
           if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
         }
@@ -197,13 +191,6 @@ export default class Changes extends View {
     this.banner = shown; this.bannerOpen = true;
     cx.notify();
     cx.timer.after(2200, (cx) => { if (this.banner === shown) { this.bannerOpen = false; cx.notify(); } });
-  }
-
-  diffRow({ kind, number, text }, t) {
-    if (kind === "@") return div().w_full().px(12).h(20).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
-    return h_flex().w_full().h(20).flex_none().gap(10).when(kind === "+", (e) => e.bg(t.ansi2 + "18")).when(kind === "-", (e) => e.bg(t.ansi1 + "18"))
-      .child(div().w(30).flex_none().text_right().text_color(t.dim).child(number === undefined ? "" : String(number)))
-      .child(div().flex_1().min_w(0).truncate().child(text));
   }
 
   // The agents switched on in settings, and the one picked from them (null: none on).
@@ -237,14 +224,16 @@ export default class Changes extends View {
   generate(cx) {
     if (this.gen || this.blocked() || this.context !== key()) return;
     const root = this.root, context = this.context, hasHead = this.hasHead, agent = this.agent();
-    const fresh = this.files.filter((f) => f.fresh).map((f) => f.path);
+    // It describes what Commit would commit: the staged files, or everything.
+    const staged = this.files.some((f) => f.area === "staged");
+    const fresh = staged ? [] : this.files.filter((f) => f.area === "untracked").map((f) => f.path);
     const gen = { agent, pid: `/tmp/t3-changes-${Date.now()}.pid` };
     this.gen = gen; this.note = null; this.picking = false;
     cx.spawn(async (cx) => {
       try {
         const [log, diff] = await Promise.all([
           exec("git", [...READ, "log", "--format=%s", "-10"], { cwd: root }).catch(() => null),
-          exec("git", [...READ, "diff", ...(hasHead ? ["HEAD"] : ["--cached"]), "--no-color", "--no-textconv", "--no-ext-diff"], { cwd: root }).catch(() => null),
+          exec("git", [...READ, "diff", ...(staged || !hasHead ? ["--cached"] : ["HEAD"]), "--no-color", "--no-textconv", "--no-ext-diff"], { cwd: root }).catch(() => null),
         ]);
         const prompt = buildPrompt({
           instructions: shared(SETTINGS_KEY)?.prompt,
@@ -341,11 +330,92 @@ export default class Changes extends View {
         .child(row("agent-settings", "mods/workspace-chrome/settings.svg", t.muted, "Settings…", "agents, prompt", false, (cx) => this.openSettings(cx))));
   }
 
+  // A small icon button in a row or section title; it acts only while shown,
+  // and its click doesn't reach the row under it.
+  action(id, icon, tip, shown, act, t, danger = false) {
+    return div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(5)
+      .when(danger, (el) => el.bg(t.ansi1 + "20"))
+      .when(shown, (el) => el.cursor_pointer().tooltip(tip)
+        .hover((s) => s.bg(danger ? t.ansi1 + "30" : t.selected)).active((s) => s.bg(danger ? t.ansi1 + "40" : t.selected))
+        .on_click((_e, cx) => { cx.stop_propagation(); act(cx); }))
+      .child(svg(icon).size(13).text_color(danger ? t.ansi1 : t.muted));
+  }
+
+  // A changed file: its icon in the status colour, name, folder, line counts
+  // and status letter. Under the pointer the counts give way to its actions.
+  fileRow(f, t) {
+    const k = keyOf(f), hovered = this.hover === k, armed = this.confirm === k;
+    const parts = f.path.split("/"), name = parts.pop();
+    const actions = f.area === "staged"
+      ? [this.action(`unstage-${k}`, "mods/workspace-chrome/minus.svg", "Unstage", hovered, (cx) => this.unstage([f], cx), t)]
+      : [
+        ...(f.area === "merge" ? [] : [this.action(`discard-${k}`, f.area === "untracked" ? "mods/workspace-chrome/x.svg" : "mods/t3-changes/undo.svg",
+          armed ? "Click again to discard" : f.area === "untracked" ? "Delete this file" : "Discard changes", hovered, (cx) => this.discard(f, cx), t, armed)]),
+        this.action(`stage-${k}`, "mods/workspace-chrome/plus.svg", f.area === "merge" ? "Mark resolved (stage)" : "Stage", hovered, (cx) => this.stage([f], cx), t),
+      ];
+    return h_flex().id(`change-${k}`).h(FILE_ROW).flex_none().pl(24).pr(6).gap(6).items_center().rounded(6).cursor_pointer()
+      .when(this.viewing === k, (el) => el.bg(t.selected)).hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected))
+      .on_hover((h, cx) => {
+        if (h) this.hover = k;
+        else if (this.hover === k) this.hover = null;
+        cx.notify();
+      })
+      .on_click((_e, cx) => this.openDiff(f, cx))
+      .child(svg("mods/t3-files/file.svg").size(13).flex_none().text_color(statusColor(f.status, t)))
+      .child(h_flex().flex_1().min_w(0).gap(6).items_center()
+        .child(div().flex_shrink(1).min_w(0).truncate().text_size(12.5).child(name))
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(parts.join("/"))))
+      // Wide enough for the actions, so they never cover the name.
+      .child(div().relative().flex_none().min_w(48).h(22)
+        .child(h_flex().h_full().gap(4).items_center().justify_end().text_size(11).opacity(hovered ? 0 : 1).transition("opacity", FADE)
+          .when(f.add > 0, (el) => el.child(div().text_color(t.ansi2).child(`+${f.add}`)))
+          .when(f.del > 0, (el) => el.child(div().text_color(t.ansi1).child(`−${f.del}`))))
+        .child(h_flex().absolute().top(0).right(0).h_full().gap(2).items_center().opacity(hovered ? 1 : 0).transition("opacity", FADE).children(actions)))
+      .child(div().w(12).flex_none().text_center().text_size(10.5).font_semibold().text_color(statusColor(f.status, t)).child(f.status));
+  }
+
+  // A section (Merge, Staged, Changes, Untracked): its title folds it and,
+  // under the pointer, offers to stage or unstage all of it.
+  section(area, files, t) {
+    const open = !this.collapsed.has(area), hovered = this.hover === `section:${area}`;
+    const all = area === "staged"
+      ? [this.action(`unstage-all`, "mods/workspace-chrome/minus.svg", "Unstage all", hovered, (cx) => this.unstage(files, cx), t)]
+      : area === "merge" ? [] : [this.action(`stage-all-${area}`, "mods/workspace-chrome/plus.svg", "Stage all", hovered, (cx) => this.stage(files, cx), t)];
+    return v_flex().flex_none()
+      .child(h_flex().id(`section-${area}`).h(28).flex_none().px(6).gap(6).items_center().rounded(6).cursor_pointer()
+        .hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected))
+        .on_hover((h, cx) => { if (h) this.hover = `section:${area}`; else if (hovered) this.hover = null; cx.notify(); })
+        .on_click((_e, cx) => { if (open) this.collapsed.add(area); else this.collapsed.delete(area); cx.notify(); })
+        .child(svg(`mods/t3-files/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim))
+        .child(div().text_size(11).font_semibold().text_color(t.muted).child(AREAS[area].toUpperCase()))
+        .child(div().px(6).rounded(8).bg(t.raised).text_size(10.5).text_color(t.muted).child(String(files.length)))
+        .child(div().flex_1())
+        .child(h_flex().gap(2).opacity(hovered ? 1 : 0).transition("opacity", FADE).children(all)))
+      .child(v_flex().overflow_hidden().h(open ? files.length * (FILE_ROW + 1) : 0).transition("height", OPEN).gap(1)
+        .children(files.map((f) => this.fileRow(f, t))));
+  }
+
+  // What the list says when it has no files: why, and what to do.
+  empty(t) {
+    const [icon, title, detail, color] = this.error === "Not a git repository"
+      ? ["mods/workspace-chrome/folder.svg", "Not a git repository", "Focus a terminal in a repository to see its changes.", t.muted]
+      : this.error ? ["mods/workspace-chrome/x.svg", "Cannot read the changes", this.error, t.ansi1]
+      : !this.root ? [null, "Loading changes…", "", t.muted]
+      : ["mods/workspace-chrome/circle-check.svg", "No changes", "The working tree matches the last commit.", t.ansi2];
+    return v_flex().w_full().pt(32).px(20).gap(6).items_center()
+      .child(div().size(36).rounded(18).flex().items_center().justify_center().bg(t.raised)
+        .child(icon ? svg(icon).size(16).text_color(color) : svg("mods/workspace-chrome/spinner.svg").size(16).text_color(t.accent).spin(900)))
+      .child(div().mt(4).text_size(13).font_semibold().child(title))
+      .when(Boolean(detail), (el) => el.child(div().text_center().text_size(11.5).text_color(t.dim).child(detail)));
+  }
+
   render(cx) {
     if (this.dialog) return this.dialog.render(cx);
     if (key() !== this.context) this.refresh(cx);
     this.probe(this.agents().map((a) => a.bin), cx);
     const t = theme(), add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
+    const count = paths(this.files).length, staged = this.files.some((f) => f.area === "staged");
+    const groups = Object.keys(AREAS).map((area) => [area, this.files.filter((f) => f.area === area)]).filter(([, files]) => files.length);
     const enabled = Boolean(this.message.trim() && this.root && !this.busy && !this.loading);
     return v_flex().id("changes").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => {
@@ -353,8 +423,9 @@ export default class Changes extends View {
       })
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Changes"))
-        .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${this.files.length} files`))
-        .child(div().flex_1()).child(div().text_size(11).text_color(t.ansi2).child(`+${add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${del}`)))
+        .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${count} ${count === 1 ? "file" : "files"}`))
+        .child(div().flex_1()).child(div().text_size(11).text_color(t.ansi2).child(`+${add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${del}`))
+        .when(count > 0, (el) => el.child(this.action("review-all", "mods/workspace-chrome/git-compare.svg", "Review all changes", true, (cx) => this.openDiff(null, cx), t))))
       .child(v_flex().flex_none().p(10).gap(6).border_b(1).border_color(t.border)
         .child(div().id("commit-message").relative().w_full().min_w(0).pl(10).pr(32).py(6).rounded(8).border_1()
           .border_color(this.typing ? t.accent : t.border).cursor_text()
@@ -368,7 +439,7 @@ export default class Changes extends View {
           .child(this.agentPicker(t))
           .child(div().flex_1())
           .child(div().id("commit").flex_none().h(24).px(10).flex().items_center().rounded(6).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(11.5)
-            .when(enabled, (e) => e.cursor_pointer().hover((s) => s.opacity(0.9)).active((s) => s.opacity(0.75))).tooltip(enabled ? "Stage everything and commit (⌘↵)" : "Write a message first")
+            .when(enabled, (e) => e.cursor_pointer().hover((s) => s.opacity(0.9)).active((s) => s.opacity(0.75))).tooltip(!enabled ? "Write a message first" : staged ? "Commit the staged files (⌘↵)" : "Stage everything and commit (⌘↵)")
             .on_click((_e, cx) => this.commit(cx)).child(this.busy ? "Committing…" : "Commit")))
         .child(div().id("commit-banner").w_full().overflow_hidden().h(this.bannerOpen ? 34 : 0).transition("height", OPEN)
           .child(h_flex().mt(8).h(26).w_full().gap(6).items_center().px(10).rounded(7)
@@ -378,21 +449,11 @@ export default class Changes extends View {
             .child(div().flex_1().min_w(0).truncate().child(this.banner?.text ?? ""))))))
       .when(Boolean(this.note), (e) => e.child(div().px(12).py(6).border_b(1).border_color(t.border).text_size(11).text_color(t.ansi1).child(this.note)))
       // overflow_y_scrollbar() wraps the list, so its flex sizing never reached the panel's layout.
-      .child(div().flex_1().min_h(44).max_h(this.files.length * 28 + 12).relative().border_b(1).border_color(t.border)
-        .child(v_flex().id("changes-list").absolute().inset_0().overflow_y_scroll().p(6).children(this.files.map((f) => {
-        const parts = f.path.split("/"), name = parts.pop();
-        return h_flex().id(`change-${f.path}`).h(28).flex_none().px(8).gap(8).items_center().rounded(7).cursor_pointer().when(this.open === f.path, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected)).on_click((_e, cx) => this.pick(f.path, cx))
-          .child(div().w(14).text_size(11).text_color(f.status === "A" ? t.ansi2 : f.status === "D" ? t.ansi1 : f.status === "U" ? t.ansi1 : t.blocked).child(f.status))
-          .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().child(name)))
-          .when(f.add > 0, (e) => e.child(div().text_size(11).text_color(t.ansi2).child(`+${f.add}`))).when(f.del > 0, (e) => e.child(div().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));
-      })).when(!this.files.length, (e) => e.child(div().p(8).text_color(t.dim).child(this.error || (this.loading ? "Loading changes…" : this.root ? "No uncommitted changes" : "No folder")))))
-        .child(Scrollbar.vertical("changes-list").absolute().inset_0()))
-      .when(this.limited, el => el.child(div().px(12).py(4).text_size(11).text_color(t.dim).child("Showing the first 1,000 changed files")))
-      .child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(11)
-        .child(div().id("changes-diff-x").size_full().overflow_x_scrollbar()
-          .child(div().w_full().min_w(this.diffWidth).h_full().child(v_virtual_list("changes-diff", this.rows.length, 20, (i) => String(i),
-            (range) => this.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t))).size_full())))
-        .child(Scrollbar.vertical("changes-diff").viewport_from_layout().absolute().inset_0())
-        .when(!this.open && this.files.length > 0, (e) => e.child(div().absolute().top(6).px(12).text_color(t.dim).child("Select a file to view its changes"))));
+      .child(div().flex_1().min_h(0).relative()
+        .child(v_flex().id("changes-list").absolute().inset_0().overflow_y_scroll().px(6).py(6).gap(2)
+          .when(groups.length > 0, (el) => el.children(groups.map(([area, files]) => this.section(area, files, t))))
+          .when(!groups.length, (el) => el.child(this.empty(t)))
+          .when(this.limited, (el) => el.child(div().px(8).py(4).text_size(11).text_color(t.dim).child("Showing the first 1,000 changed files"))))
+        .child(Scrollbar.vertical("changes-list").absolute().inset_0()));
   }
 }
