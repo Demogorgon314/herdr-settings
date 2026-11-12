@@ -47,11 +47,22 @@ panel's width. Every button has a hover fill and a darker pressed state.
 
 - **Files**: hovering a row fades in Favorite (folders), `cd` here (folders) and Copy path; a done
   action shows a green check for 1.2s instead of a toast.
-- **Changes**: ✨ runs the agent from the chip (Claude Haiku, Claude Sonnet, Codex, pi, OpenCode;
-  missing ones are marked `not installed`) and fills the box; while it runs the ✨ spins and turns
+- **Changes**: ✨ runs the agent from the chip (Claude Haiku and Codex GPT-6-Luna at low effort,
+  pi at low thinking on its own model, OpenCode on its own, or yours; the chip, at most 240px, and
+  the menu name each one's model and effort, a config default by what it resolves to, and mark
+  missing ones `not installed`) and fills the box; while it runs the ✨ spins and turns
   into a red stop square under the pointer. Disabled states explain themselves in the tooltip
-  (loading, committing, no changes, message not empty, remote repo, agent not installed). The chip
-  drops its menu over the file list. ⌘↵ or Commit stages everything and commits; a green
+  (loading, committing, no changes, message not empty, remote repo, no agent on, agent not
+  installed). The chip drops its menu over the file list; its last row, Settings…, opens a 560×640
+  dialog after Orca's: a card per agent (a logo tile that drops a 6×2 grid of marks, Name, an
+  on/off switch whose knob springs across, ✕; then a Model dropdown, 340px, with a search field
+  that also takes a typed name, Default first as `Default · <what the config runs>`, the listed
+  models with their descriptions, and a footer `N models · listed 5m ago` with Refresh; an Effort
+  dropdown, 118px, hanging from its right edge, with Default and the levels that model takes;
+  then its command in a mono input, and a note when its program is missing or a choice has no
+  placeholder to go to), then a full-width 36px dashed Add agent slot (accent border and text on
+  hover); the prompt's instructions in a mono textarea. Restore defaults and Reset to default sit
+  at the right of their section titles, fading in once something differs. Cancel or Esc drops the edits; Save or ⌘↵ stores them. ⌘↵ or Commit stages everything and commits; a green
   `✓ Committed <hash>` banner folds open under the button for 2.2s.
 - **Sessions**: rescans every 30s and whenever the space or focused terminal changes. A click
   resumes the session in a new tab in its recorded folder; `+` (fades in on hover) adds
@@ -72,12 +83,22 @@ panel's width. Every button has a hover fill and a darker pressed state.
   `favorites` → `t3-favorites`]; `work-bottom-inset` (6px); `status` → `workspace-status` (hidden).
 
 Mods: `t3-files` and `t3-changes` are clones of the shipped `files` and `changes`
-(`mod.clone`); `t3-changes/ai.js` holds the agent table, prompt, diff budget and output cleanup.
+(`mod.clone`); `t3-changes/ai.js` holds the logos, the default agents (each a shell command with
+`{model}` and `{effort}`), their substitution,
+prompt, diff budget and output cleanup; `t3-changes/models.js` lists each CLI's models (Claude
+`-p --input-format stream-json` with a `list_models` control request; Codex `app-server`
+`model/list` paged by a `python3 -c` client; pi `--list-models` plus `~/.pi/agent/settings.json`
+for its default; `opencode models`); `t3-changes/settings.js` draws the dialog, which is
+`t3-changes` itself opened with `openOverlay({ kind: "dialog", props: { settings: true } })`.
 `t3-sessions` scans with one `python3 -c` pass (pi `~/.pi/agent/sessions/*/*.jsonl`, Claude
 `~/.claude/projects/*/*.jsonl`, Codex `~/.codex/sessions/*/*/*/rollout-*.jsonl` titled from
 `~/.codex/session_index.jsonl`) plus `sqlite3` on `~/.local/share/opencode/opencode.db`. Agent
-marks are `mods/t3-sessions/agents/{claude,codex,pi,opencode}.svg`, used by both mods. Shared state:
-`t3.favorites`, `t3.sessions.tags`, `t3.commit.agent`. Calls: `exec`, `hc send` (cd),
+marks are `mods/t3-sessions/agents/*.svg` (claude, codex, pi, opencode, cursor, kimi, grok, devin,
+deepseek, generic), used by both mods. Shared state:
+`t3.favorites`, `t3.sessions.tags`, `t3.commit.agent`, `t3.commit.settings` (`{ agents: [{ id,
+name, logo, model, effort, command, off? }], prompt }`, each left out while it matches the
+default), `t3.commit.models` (listings by program: `{ at, models: [{ id, label, detail, efforts }],
+default: { label, efforts }, error? }`). Calls: `exec`, `hc send` (cd),
 `run("terminal.open" | "layout.select" | "layout.toggle" | "space.select" | "space.new" | "mod.open")`,
 `setShared`, `pickFolder`, `notify`. Shipped mods relied on: `workspace-status`, and art from
 `workspace-chrome` (spinner, check, square, chevron-down, plus, panel-right).
@@ -90,13 +111,24 @@ marks are `mods/t3-sessions/agents/{claude,codex,pi,opencode}.svg`, used by both
   all the time at opacity 0 or height 0. A folded element still counts in its parent's `gap`; wrap
   it with its neighbour instead.
 - A dropdown below other content must go in a `Popup`, or later siblings paint over it.
+  Its `on_mouse_down_out` closes it on the press, before the trigger's click lands: a trigger that
+  toggles would open it again, so a click within 400ms of that close leaves it closed.
 - `exec` has no stdin and no cancel: commit messages run through
-  `sh -c 'f=$1; echo $$ > "$f"; p=$2; shift 2; printf "%s" "$p" | "$@"; …'` and Stop kills the
-  children of the pid in that file. Save the pid file's path before `shift`.
+  `sh -c 'f=$1; p=$2; c=$3; echo $$ > "$f"; printf "%s" "$p" | eval "$c"; …'` and Stop kills the
+  whole process tree under the pid in that file (a command can be a pipeline or a wrapper).
+- A mod can't import another mod's files (`resolves outside the application directory`): a
+  dialog that shares code opens the same mod with props. Read them with `props()`; `init`'s first
+  argument is not the overlay's props.
 - Agents run one-shot and isolated: Claude `-p --tools "" --strict-mcp-config --settings
   {"disableAllHooks":true}`; Codex `exec --ephemeral -s read-only`; pi `--print --no-session
   --no-tools --no-skills --no-extensions --no-context-files`. Codex and OpenCode take 14–17s, Claude
-  Haiku and pi 2–4s.
+  Haiku and pi 2–4s. Model flags: Claude and pi `--model`, Codex and OpenCode `-m` (OpenCode wants
+  `provider/model`); effort: Claude `--effort`, Codex `-c model_reasoning_effort=`, pi
+  `--thinking`, OpenCode `--variant`. A smaller model barely shortens Codex: `codex exec` itself
+  takes most of its 15s.
+- `codex app-server` doesn't exit after answering: a listing client reads until the last page,
+  then kills it. Its listing can take 5–10s (it refreshes models online first), so listings are
+  kept for a day and only made when the menu or dialog opens.
 - Codex user prompts start with injected context (AGENTS.md, `<environment_context>`…): skip it for
   titles; leave out delegated sub-agent rollouts; collapse a thread's rollouts to the newest.
 - A panel is not re-rendered when the space or focus changes: Sessions watches `where()` on a 500ms
@@ -114,6 +146,10 @@ marks are `mods/t3-sessions/agents/{claude,codex,pi,opencode}.svg`, used by both
   clipboard and shows a check.
 - In Changes, ✨ fills the box with a message from the chosen agent, Stop ends it, and
   Commit commits and shows the banner.
+- In Settings…, Claude's Model lists Opus, Fable, Sonnet and Haiku after `Default · Opus 5.5`,
+  Codex's Effort for GPT-6-Luna offers Low to Max, switching an agent off drops it from the menu, a
+  picked logo and model show on the chip (`Claude · Haiku`), pi's chip names its configured model, an added `cat` agent fills the box with the prompt itself (your
+  instructions first), and Cancel leaves `t3.commit.settings` as it was.
 - Sessions lists Codex rows with the Codex mark and resumes one with `codex resume <id>` in its
   folder; `#tag` narrows the list.
 - Favorites' Add current saves the space's folder and a click switches to that space.

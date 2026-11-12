@@ -22,7 +22,7 @@ blurred.
 | `mods/t3-pane` | Pane header: program icon, title, folder, status; split, zoom and close |
 | `mods/t3-tools-nav` | Segmented switch over the tools panel, with a sliding pill; icons only under 326px |
 | `mods/t3-files` | Clone of Herdr's `files`; hovering a row fades in Favorite, `cd` here, and Copy path |
-| `mods/t3-changes` | Clone of Herdr's `changes` with an [Orca](https://github.com/stablyai/orca)-style commit box: multi-line message (⌘↵ commits), ✨ asks an agent of your choice to write it |
+| `mods/t3-changes` | Clone of Herdr's `changes` with an [Orca](https://github.com/stablyai/orca)-style commit box: multi-line message (⌘↵ commits), ✨ asks an agent of your choice to write it; agents and prompt are set in its Settings dialog |
 | `mods/t3-sessions` | pi, Claude Code, OpenCode and Codex sessions recorded in the current space's folder; click to resume, `+` to tag, `#tag` to filter |
 | `mods/t3-favorites` | Saved folders; click to switch to that space (or open one) |
 | `keys.json` | Only the `layout:herdr-t3` section: `cmd-shift-b` switches the sidebar, `cmd-shift-a` the one-agent view |
@@ -32,8 +32,9 @@ Herdr and are not in this repo.
 
 `t3-files`, `t3-changes`, `t3-sessions` and `t3-favorites` started as ports of
 [Lamb-Yang/herdr-sessions](https://github.com/Lamb-Yang/herdr-sessions). Agent marks and colours
-follow [HarnessTrajectory](https://github.com/Demogorgon314/HarnessTrajectory) (marks from
-lobe-icons, MIT).
+follow [HarnessTrajectory](https://github.com/Demogorgon314/HarnessTrajectory): Claude and Cursor
+from Simple Icons (CC0), Codex, Kimi, Grok, Devin, pi and OpenCode from lobe-icons (MIT), DeepSeek's
+fish from deepseek-harness. The marks belong to their makers and only identify the agents here.
 
 ## Install
 
@@ -63,11 +64,37 @@ A missing program only turns off its own feature.
 ## AI commit messages
 
 The ✨ in the Changes message box runs the chosen agent once, read-only and without saving a
-session (Claude Haiku or Sonnet, Codex, pi, OpenCode; the choice is kept as `t3.commit.agent`).
-The prompt goes in on stdin: the changed files, up to 60,000 characters of diff shared fairly
-across files, and your last ten commit subjects so the message matches their language and style.
-That diff is sent to the model behind the agent you pick. While it writes, the ✨ turns into a
-spinner; click it to stop.
+session (Claude, Codex, pi and OpenCode to start with; the choice is kept as `t3.commit.agent`).
+The prompt goes in on stdin: the instructions, your last ten commit subjects so the message
+matches their language and style, new file names, and up to 60,000 characters of diff shared
+fairly across files. That diff is sent to the model behind the agent you pick. While it writes,
+the ✨ turns into a spinner; click it to stop.
+
+A commit message needs no strong model, so the defaults are small and quick: Claude Haiku and
+Codex GPT-6-Luna at low effort, pi at low thinking on its configured model, OpenCode on its own.
+
+**Settings…** at the bottom of the agent menu opens a dialog, laid out after
+[Orca](https://github.com/stablyai/orca)'s, where you can:
+
+- switch each agent on or off (only those on are in the menu);
+- change its name and logo (Claude, Codex, pi, OpenCode, Cursor, Kimi, Grok, Devin, DeepSeek or
+  a plain mark);
+- pick its model and effort. Like Orca, each known CLI lists its own models: Claude through its
+  `list_models` control request, Codex through `codex app-server`'s `model/list`, pi through
+  `--list-models` and OpenCode through `opencode models`. The list is searchable, takes a typed
+  name too, and starts with Default, named after what the CLI's config runs (e.g. `Default · Opus
+  5.5`). Effort offers the levels the chosen model takes. Listings are kept for a day as
+  `t3.commit.models`; Refresh lists again. Other programs take a typed model and effort;
+- edit its command, a shell line run in the repository that reads the prompt on stdin and prints
+  the message. `{model}` and `{effort}` in it take the choices; an empty one is left out together
+  with the flag in front of it, so the CLI uses its own config;
+- add agents of your own, e.g. `ollama run {model}`, or remove any (Restore defaults brings the
+  four back);
+- rewrite the instructions (Reset to default brings them back).
+
+The chip and the menu name the model each agent runs, its config default included (`pi ·
+deepseek-v4.1-flash`). Save (⌘↵) keeps the settings in `t3.commit.settings`; nothing is stored
+while they match the defaults.
 
 ## Sync
 
@@ -82,5 +109,5 @@ It rebuilds `layouts/`, `mods/` and `keys.json` from that layout and the non-shi
 (including mods named in their code). `gpui-kit.d.ts` and `jsconfig.json` are editor files Herdr
 writes and are not tracked.
 
-Favorites and session tags live in Herdr's `shared.json` under `t3.favorites` and
-`t3.sessions.tags`.
+Favorites, session tags and commit message settings live in Herdr's `shared.json` under
+`t3.favorites`, `t3.sessions.tags`, `t3.commit.agent`, `t3.commit.settings` and `t3.commit.models`.

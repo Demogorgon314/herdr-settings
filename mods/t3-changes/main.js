@@ -1,7 +1,9 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea, Scrollbar, v_virtual_list, Popup } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, shared, setShared } from "herdr";
-import { AGENTS, buildPrompt, truncateDiff, cleanMessage } from "./ai.js";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, shared, setShared, openOverlay, props } from "herdr";
+import { SETTINGS_KEY, agentsFrom, commandFor, buildPrompt, truncateDiff, cleanMessage } from "./ai.js";
+import { CommitSettings } from "./settings.js";
+import { discover, modelName, effortLabel } from "./models.js";
 
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
@@ -36,6 +38,7 @@ function diffRows(lines) {
 
 export default class Changes extends View {
   init(_props, cx) {
+    if (props()?.settings) { this.dialog = new CommitSettings(cx); return; }
     this.files = []; this.rows = []; this.diffWidth = 0; this.message = ""; this.handle = cx.focus_handle();
     this.gen = null; this.picking = false; this.installed = null;
     this.input = TextareaState.new({ placeholder: "Commit message (⌘↵ to commit)" });
@@ -50,9 +53,16 @@ export default class Changes extends View {
     this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     this.refresh(cx);
     cx.timer.every(10000, (cx) => this.refresh(cx));
+  }
+
+  // Which of the agents' programs are on PATH, looked up again when settings name others.
+  probe(bins, cx) {
+    const want = [...new Set(bins.filter(Boolean))].sort().join(" ");
+    if (want === this.probed) return;
+    this.probed = want;
     cx.spawn(async (cx) => {
-      const bins = [...new Set(AGENTS.map((a) => a.bin))].join(" ");
-      const r = await exec("sh", ["-c", `for b in ${bins}; do command -v "$b" >/dev/null 2>&1 && echo "$b"; done`]).catch(() => null);
+      const r = await exec("sh", ["-c", 'for b; do command -v "$b" >/dev/null 2>&1 && echo "$b"; done', "sh", ...want.split(" ")]).catch(() => null);
+      if (this.probed !== want) return;
       this.installed = new Set((r?.stdout ?? "").split("\n").filter(Boolean));
       cx.notify();
     });
@@ -196,9 +206,16 @@ export default class Changes extends View {
       .child(div().flex_1().min_w(0).truncate().child(text));
   }
 
+  // The agents switched on in settings, and the one picked from them (null: none on).
+  agents() { return agentsFrom(shared(SETTINGS_KEY)).filter((a) => a.enabled); }
   agent() {
-    const id = shared(AGENT_KEY);
-    return AGENTS.find((a) => a.id === id) ?? AGENTS.find((a) => this.installed?.has(a.bin)) ?? AGENTS[0];
+    const id = shared(AGENT_KEY), on = this.agents();
+    return on.find((a) => a.id === id) ?? on.find((a) => this.installed?.has(a.bin)) ?? on[0] ?? null;
+  }
+
+  openSettings(cx) {
+    this.picking = false; cx.notify();
+    openOverlay({ mod: "t3-changes", kind: "dialog", width: 560, height: 640, props: { settings: true } });
   }
 
   // Why the generate button can't run now, or null when it can.
@@ -209,13 +226,14 @@ export default class Changes extends View {
     if (!this.files.length) return "No changes to describe";
     if (this.message.trim()) return "Clear the message to regenerate";
     const agent = this.agent();
+    if (!agent) return "No agent is on: turn one on in the agent menu's Settings";
     if (this.installed && !this.installed.has(agent.bin)) return `${agent.bin} is not installed: pick another agent`;
     return null;
   }
 
   // Fills the message box with what the chosen agent writes from the diff. The
-  // prompt goes in on stdin (an argument would show in `ps`), and the pid file
-  // lets Stop kill the run.
+  // prompt goes in on stdin (an argument would show in `ps`), the command is a
+  // shell line from settings, and the pid file lets Stop kill the run.
   generate(cx) {
     if (this.gen || this.blocked() || this.context !== key()) return;
     const root = this.root, context = this.context, hasHead = this.hasHead, agent = this.agent();
@@ -229,17 +247,18 @@ export default class Changes extends View {
           exec("git", [...READ, "diff", ...(hasHead ? ["HEAD"] : ["--cached"]), "--no-color", "--no-textconv", "--no-ext-diff"], { cwd: root }).catch(() => null),
         ]);
         const prompt = buildPrompt({
+          instructions: shared(SETTINGS_KEY)?.prompt,
           diff: truncateDiff(diff?.code === 0 ? diff.stdout : ""),
           recent: log?.code === 0 ? log.stdout.trim() : "",
           fresh,
         });
-        const run = 'f=$1; echo $$ > "$f"; p=$2; shift 2; printf "%s" "$p" | "$@"; s=$?; rm -f "$f"; exit $s';
-        const r = await exec("sh", ["-c", run, "sh", gen.pid, prompt, agent.bin, ...agent.args], { cwd: root, timeout: 180000 });
+        const run = 'f=$1; p=$2; c=$3; echo $$ > "$f"; printf "%s" "$p" | eval "$c"; s=$?; rm -f "$f"; exit $s';
+        const r = await exec("sh", ["-c", run, "sh", gen.pid, prompt, commandFor(agent)], { cwd: root, timeout: 180000 });
         if (this.gen !== gen || key() !== context) return;
         const message = cleanMessage(r.stdout);
-        if (!message) throw new Error((r.stderr || "").trim().split("\n").pop() || `${agent.label} returned nothing`);
+        if (!message) throw new Error((r.stderr || "").trim().split("\n").pop() || `${agent.name} returned nothing`);
         this.message = message; this.input.set_value(message);
-      } catch (e) { if (this.gen === gen && key() === context) this.note = `${agent.label} could not write a message: ${e}`; }
+      } catch (e) { if (this.gen === gen && key() === context) this.note = `${agent.name} could not write a message: ${e}`; }
       finally { if (this.gen === gen) this.gen = null; cx.notify(); }
     });
     cx.notify();
@@ -249,7 +268,9 @@ export default class Changes extends View {
     const gen = this.gen;
     if (!gen) return;
     this.gen = null;
-    exec("sh", ["-c", 'pid=$(cat "$1" 2>/dev/null) && pkill -TERM -P "$pid"; rm -f "$1"', "sh", gen.pid]).catch(() => null);
+    // The whole tree under the run's shell: a command can be a pipeline or a wrapper.
+    const kill = 'k() { for c in $(pgrep -P "$1"); do k "$c"; kill -TERM "$c" 2>/dev/null; done; }; pid=$(cat "$1" 2>/dev/null) && k "$pid"; rm -f "$1"';
+    exec("sh", ["-c", kill, "sh", gen.pid]).catch(() => null);
     cx.notify();
   }
 
@@ -259,7 +280,7 @@ export default class Changes extends View {
     const base = div().id("commit-ai").absolute().top(6).right(6).size(22).flex().items_center().justify_center().rounded(5);
     if (this.gen) {
       return base.cursor_pointer().hover((s) => s.bg(t.ansi1 + "18")).active((s) => s.bg(t.ansi1 + "30"))
-        .tooltip(`${this.gen.agent.label} is writing a message. Click to stop.`)
+        .tooltip(`${this.gen.agent.name} is writing a message. Click to stop.`)
         .on_hover((h, cx) => { if (h !== Boolean(this.stopHover)) { this.stopHover = h; cx.notify(); } })
         .on_click((_e, cx) => { cx.stop_propagation(); this.stop(cx); })
         .child(this.stopHover
@@ -267,48 +288,63 @@ export default class Changes extends View {
           : svg("mods/workspace-chrome/spinner.svg").size(13).text_color(t.accent).spin(900));
     }
     const why = this.blocked();
-    return base.tooltip(why ?? `Write a message with ${this.agent().label}`)
+    return base.tooltip(why ?? `Write a message with ${this.agent().name}`)
       .when(!why, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected)))
       .on_click((_e, cx) => { cx.stop_propagation(); this.generate(cx); })
       .child(svg("mods/t3-changes/sparkles.svg").size(13).text_color(why ? t.dim : t.accent));
   }
 
-  // Which agent writes the message: a chip that drops a list over the file list.
+  // Which agent writes the message: a chip that drops a list over the file list,
+  // ending in Settings.
   agentPicker(t) {
-    const agent = this.agent(), name = agent.model ? `${agent.label} · ${agent.model}` : agent.label;
-    // Drawn while closed too, at no height: opening then grows it upwards and fades it in.
-    const open = this.picking, full = AGENTS.length * 29 + 7;
-    const chip = h_flex().id("commit-agent").h(24).px(6).gap(4).items_center().rounded(7).cursor_pointer().text_size(11.5).text_color(t.muted)
+    const agent = this.agent(), agents = this.agents();
+    const model = agent && modelName(agent), name = !agent ? "No agent" : model ? `${agent.name} · ${model}` : agent.name;
+    // The menu says which model each runs, at what effort; Default names the CLI's own when listed.
+    const detail = (a) => [modelName(a) || (a.command.includes("{model}") ? "default model" : ""), a.effort && effortLabel(a.effort)].filter(Boolean).join(" · ");
+    // Drawn while closed too, at no height: opening then grows it and fades it in.
+    const open = this.picking, full = agents.length * 29 + 46;
+    const row = (id, icon, color, label, detail, mark, act) => h_flex().id(id).h(28).flex_none().px(8).gap(8).items_center().rounded(6).text_size(12)
+      .text_color(act ? t.foreground : t.dim)
+      .when(Boolean(act), (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected)).on_click((_e, cx) => act(cx)))
+      .child(svg(icon).size(13).flex_none().text_color(color))
+      .child(div().flex_1().min_w(0).truncate().child(label))
+      .child(div().flex_none().max_w(150).truncate().text_size(11).text_color(t.dim).child(detail))
+      .child(div().w(12).flex_none().child(mark ? svg("mods/workspace-chrome/check.svg").size(12).text_color(t.accent) : div()));
+    const chip = h_flex().id("commit-agent").min_w(0).max_w(240).h(24).px(6).gap(4).items_center().rounded(7).cursor_pointer().text_size(11.5).text_color(t.muted)
         .when(open, (el) => el.bg(t.selected).text_color(t.foreground))
         .hover((s) => s.bg(t.hover).text_color(t.foreground)).active((s) => s.bg(t.selected))
         .tooltip("Agent that writes commit messages")
-        .on_click((_e, cx) => { this.picking = !this.picking; cx.notify(); })
-        .child(svg(agent.icon).size(12).flex_none().text_color(agent.color ?? t.foreground))
+        .on_click((_e, cx) => {
+          // The press outside the menu already closed it: this click must not reopen it.
+          const just = Date.now() - (this.pickClosed ?? 0) < 400;
+          this.picking = !this.picking && !just; this.pickClosed = 0;
+          if (this.picking) for (const a of agents) if (this.installed?.has(a.bin)) discover(a.bin, cx);
+          cx.notify();
+        })
+        .child(svg(agent?.icon ?? "mods/t3-changes/sparkles.svg").size(12).flex_none().text_color(agent ? agent.color ?? t.foreground : t.dim))
         .child(this.gen
-          ? div().loop("opacity", { from: 0.45, to: 1, period: 1400 }).child(`${this.gen.agent.label} is writing…`)
-          : div().child(name))
+          ? div().loop("opacity", { from: 0.45, to: 1, period: 1400 }).child(`${this.gen.agent.name} is writing…`)
+          : div().min_w(0).truncate().child(name))
         .child(svg("mods/workspace-chrome/chevron-down.svg").size(11).flex_none().text_color(t.dim));
     // A Popup paints in a layer above the panel, so the list below can't cover it.
-    return Popup.new("commit-agent-popup", chip).anchor("top_left").flex_none()
-      .content(v_flex().id("commit-agent-menu").mt(4).w(210).overflow_hidden()
+    return Popup.new("commit-agent-popup", chip).anchor("top_left").min_w(0)
+      .content(v_flex().id("commit-agent-menu").mt(4).w(280).overflow_hidden()
         .h(open ? full : 0).opacity(open ? 1 : 0).transition("height", OPEN).transition("opacity", FADE)
         .p(open ? 4 : 0).gap(1).rounded(8).bg(t.popover).border_1().border_color(open ? t.border : t.popover).shadow_md()
-        .on_mouse_down_out((_e, cx) => { if (this.picking) { this.picking = false; cx.notify(); } })
-        .children(AGENTS.map((a) => {
-          const here = this.installed?.has(a.bin) ?? true, on = a.id === agent.id;
-          return h_flex().id(`agent-${a.id}`).h(28).px(8).gap(8).items_center().rounded(6).text_size(12)
-            .text_color(here ? t.foreground : t.dim)
-            .when(here, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected))
-              .on_click((_e, cx) => { setShared(AGENT_KEY, a.id); this.picking = false; cx.notify(); }))
-            .child(svg(a.icon).size(13).flex_none().text_color(here ? a.color ?? t.foreground : t.dim))
-            .child(div().flex_1().min_w(0).truncate().child(a.label))
-            .child(div().flex_none().text_size(11).text_color(t.dim).child(here ? a.model ?? "" : "not installed"))
-            .child(div().w(12).flex_none().child(on ? svg("mods/workspace-chrome/check.svg").size(12).text_color(t.accent) : div()));
-        })));
+        .on_mouse_down_out((_e, cx) => { if (this.picking) { this.picking = false; this.pickClosed = Date.now(); cx.notify(); } })
+        .children(agents.map((a) => {
+          const here = this.installed?.has(a.bin) ?? true;
+          return row(`agent-${a.id}`, a.icon, here ? a.color ?? t.foreground : t.dim, a.name, !here ? "not installed" : detail(a), a.id === agent?.id,
+            here && ((cx) => { setShared(AGENT_KEY, a.id); this.picking = false; cx.notify(); }));
+        }))
+        .child(div().h(1).mx(4).my(3).flex_none().bg(t.border))
+        .child(row("agent-settings", "mods/workspace-chrome/settings.svg", t.muted, "Settings…", "agents, prompt", false, (cx) => this.openSettings(cx))));
   }
 
   render(cx) {
+    if (this.dialog) return this.dialog.render(cx);
     if (key() !== this.context) this.refresh(cx);
+    this.probe(this.agents().map((a) => a.bin), cx);
     const t = theme(), add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
     const enabled = Boolean(this.message.trim() && this.root && !this.busy && !this.loading);
     return v_flex().id("changes").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
@@ -331,7 +367,7 @@ export default class Changes extends View {
         .child(h_flex().w_full().gap(8).items_center()
           .child(this.agentPicker(t))
           .child(div().flex_1())
-          .child(div().id("commit").h(24).px(10).flex().items_center().rounded(6).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(11.5)
+          .child(div().id("commit").flex_none().h(24).px(10).flex().items_center().rounded(6).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(11.5)
             .when(enabled, (e) => e.cursor_pointer().hover((s) => s.opacity(0.9)).active((s) => s.opacity(0.75))).tooltip(enabled ? "Stage everything and commit (⌘↵)" : "Write a message first")
             .on_click((_e, cx) => this.commit(cx)).child(this.busy ? "Committing…" : "Commit")))
         .child(div().id("commit-banner").w_full().overflow_hidden().h(this.bannerOpen ? 34 : 0).transition("height", OPEN)
