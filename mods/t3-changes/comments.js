@@ -2,15 +2,18 @@
 // agent: on a line, a run of lines or a whole file, kept per repository in
 // shared state (COMMENTS_KEY: { [root]: [comment] }) so they outlive the window
 // and move with it into a tab, and sent as one prompt that names each place and
-// quotes its code. Sent comments are cleared, as Orca clears delivered notes.
+// quotes its code. Sent comments stay, marked, unless CLEAR_KEY says to clear
+// them as Orca clears delivered notes.
 //
-// A comment: { id, path, side: "new" | "old", line, from, code: ["+…"], body, at };
+// A comment: { id, path, area, side: "new" | "old", line, from, code: ["+…"], body, at, sent: { to, at } | null };
 // no line means the whole file. Lines count on the side the last line is on:
-// a removed line by the old file's numbers, any other by the new file's.
+// a removed line by the old file's numbers, any other by the new file's. area
+// is the section its card was in (a file can be in Staged and in Changes).
 
 import { shared, setShared } from "herdr";
 
 export const COMMENTS_KEY = "t3.review.comments";
+export const CLEAR_KEY = "t3.review.clearSent";
 const QUOTE = 12;
 
 export const commentsOf = (root) => shared(COMMENTS_KEY)?.[root] ?? [];
@@ -21,21 +24,53 @@ export function saveComments(root, list) {
   setShared(COMMENTS_KEY, all);
 }
 
+export const clearsSent = () => shared(CLEAR_KEY) === true;
+
+// What a send takes: the comments not sent yet, or all of them again when every one was.
+export function toSend(list) {
+  const fresh = list.filter((c) => !c.sent);
+  return fresh.length ? fresh : list;
+}
+
 // Where a row of a diff is, as a comment anchors to it (null: not a line of either file).
 export const anchorOf = (row) => row.kind === "-" ? { side: "old", line: row.old } : row.next !== undefined ? { side: "new", line: row.next } : null;
+
+// A row as a comment quotes it.
+export const quote = (row) => `${row.kind || " "}${row.text}`;
+
+// The row of a file's diff a comment belongs under as the file changes: one on
+// its side reading as its last quoted line, the more of the lines above it
+// matching its quote the better, then the nearer its line number. -1 when that
+// line is gone (the comment is outdated, as GitHub says).
+export function locate(rows, c) {
+  let best = -1, score = 0, dist = Infinity;
+  rows.forEach((row, r) => {
+    const a = anchorOf(row);
+    if (!a || a.side !== c.side || quote(row) !== c.code.at(-1)) return;
+    let n = 1;
+    for (let k = r - 1, q = c.code.length - 2; k >= 0 && q >= 0; k--) {
+      if (!anchorOf(rows[k])) continue;
+      if (quote(rows[k]) !== c.code[q--]) break;
+      n++;
+    }
+    const d = Math.abs(a.line - c.line);
+    if (n > score || (n === score && d < dist)) { best = r; score = n; dist = d; }
+  });
+  return best;
+}
 
 export const where = (c) => c.line == null ? "File" : c.from != null && c.from !== c.line ? `Lines ${c.from}–${c.line}` : `Line ${c.line}`;
 
 // A comment on rows a..b of a file's diff rows (both ends commentable lines),
 // or with no rows on the whole file.
-export function commentOn(path, body, rows, a, b) {
+export function commentOn({ path, area }, body, rows, a, b) {
   const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, at = Date.now();
-  if (!rows) return { id, path, line: null, body: body.trim(), at };
+  if (!rows) return { id, path, area, line: null, body: body.trim(), at };
   const picked = rows.slice(a, b + 1).filter((r) => anchorOf(r));
   const end = anchorOf(picked.at(-1));
   const first = picked.find((r) => anchorOf(r).side === end.side);
-  const code = picked.slice(-QUOTE).map((r) => `${r.kind || " "}${r.text}`);
-  return { id, path, ...end, from: anchorOf(first).line, code, body: body.trim(), at };
+  const code = picked.slice(-QUOTE).map(quote);
+  return { id, path, area, ...end, from: anchorOf(first).line, code, body: body.trim(), at };
 }
 
 export function formatComments(root, list) {

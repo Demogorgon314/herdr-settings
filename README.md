@@ -76,14 +76,21 @@ and its tab button moves the review, as it is, into a tab of its own.
 
 ### Review comments
 
-Leave comments on the diff the way GitHub does: click a line (shift-click another for a range),
-or a card's comment button for the whole file, write in the box at the bottom and press ⌘↵.
-Comments show under their lines; click one to edit or delete it. **Send N comments** in the title
-bar pastes them all into an agent in the current space (the focused one first), each as file,
-lines, the quoted code and your comment, and submits it, as
-[Orca](https://github.com/stablyai/orca) sends review notes; sent comments are cleared. The same
-menu copies them as text or deletes them. Comments are kept per repository in
-`t3.review.comments` until sent.
+Leave comments on the diff the way GitHub does: the line under the pointer shows a blue **+**;
+click it (shift-click another line for a range), or a card's comment button for the whole file.
+GitHub's form opens under the lines (`Add a comment on lines R57 to R59`, Write / Preview, ±
+to insert a suggestion with the lines' code); write and press ⌘↵. Comments show under their lines
+and follow them as the files change (one whose line is gone moves to the top of its file, marked
+`not in the diff now`); click one to edit it in place or delete it. A click-drag can't pick lines:
+Herdr's list rows take no mouse handlers, so a range is a click and a shift-click. **Send N comments** in the title
+bar pastes them into the prompt of an agent in the current space (the focused one first), each
+as file, lines, the quoted code and your comment, as [Orca](https://github.com/stablyai/orca)
+sends review notes, and shows that agent: nothing is submitted, so you read, edit and press Enter
+yourself. The paste goes through the clipboard. Sent comments stay, tagged `sent to <agent>`;
+the next Send takes only the new ones (or all again once every one was sent), and editing one
+makes it new. Tick **Clear after sending** in the same menu to have them cleared instead. The menu
+also copies them as text, deletes the sent ones, or deletes all. Comments are kept per repository
+in `t3.review.comments`.
 
 ## AI commit messages
 

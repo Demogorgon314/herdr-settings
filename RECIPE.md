@@ -44,9 +44,18 @@ text 11–13px.
   46px gutters, hunk lines on an `accent` tint, added and removed lines on `ansi2` / `ansi1` at
   `18` alpha, in the terminal font. A comment is a card under its line inside the file's card
   (`background`, 1px `border`, radius 8: `Lines 3–5 · 2m ago`, then the text wrapped to fit);
-  picked lines tint `accent` at `30`; the composer floats 12px above the pane's bottom (radius 10,
-  `accent` border, `shadow_lg`): a title (`Comment on lines 3–5` and the path), an auto-growing
-  textarea (2–8 rows) and Delete / Cancel / Add comment.
+  picked lines tint `accent` at `30`. A commentable line under the pointer shows a 17px `accent`
+  square (radius 4) with a 13px `accent_foreground` + over the sign column, 87px in, on a layer over
+  the whole row at opacity 0, 1 while hovered (a row takes no handlers, and a hover colour reaches
+  no child). The comment form is
+  GitHub's, under the last picked line (or at the top of the file, or in place of the comment it
+  edits): a box (`background`, 1px `border`, radius 8, 12px in from the card, 10px padding) with
+  the title (`Add a comment on lines R3 to R5`, `L` for removed lines, bold 13px, then the path
+  dimmed), an editor box (radius 6) of a `raised` tab bar (76px `Write` and `Preview`, the selected
+  one on `background` with no bottom border; at the right a 28px `file-diff.svg` button for line
+  comments), the text (a textarea in a radius-6 box, `accent` border while typing, 96–260px tall
+  as the text needs; Preview renders it as Markdown) and a dim hint line, then Delete (editing) at
+  the left and Cancel / Add comment (`solid`, half opacity while empty) at the right, 32px tall.
 - **Sessions**: rows of title, `time · folder` and tags, led by the agent's mark on a 22×20
   `raised` tile: Claude `#D97757`, Codex `#5B7CFF`, pi `#1F9D8A`, OpenCode in the text colour. The
   header counts sessions per agent as mark + number, only for agents present.
@@ -95,13 +104,22 @@ panel's width. Every button has a hover fill and a darker pressed state.
   files by `area:path` (a viewed file whose diff changed is unviewed, as on GitHub). Open in a tab
   closes the window and opens `tab.new { name: "Review · <repo>", mod: "t3-changes", props }` with
   the same files, viewed and folded.
-- **Comments**: click a line to start one there; shift-click another line of the file for the
+- **Comments**: click a line (or its +) to start one there; shift-click another line of the file for the
   lines between; the header's comment button comments on the whole file; ⌘↵ adds, Esc cancels,
-  typed text stays when another line is picked. A click on a comment edits it. Send drops a 300px
-  menu: `Send to`, the agents of the shown space (all when it has none; focused first, then the
-  most recent) with tab and status, Copy as text, Delete all comments. Sending pastes one prompt
-  with `hc send` and clears what went; a green `✓ Sent N to <agent>` chip shows for 6s, a click on
-  it focuses that agent.
+  typed text stays when another line is picked; ± adds a ```suggestion block of the picked lines'
+  new text. A click on a comment edits it. A list row takes no handlers, so the form is five list
+  rows and a click on its tabs or buttons is told apart by where the press landed. Comments and the
+  draft follow their lines when the diff is read again: the row on their side whose text is the
+  quote's last line, the more lines above matching the better, then the nearest; moved comments
+  get their new line numbers saved. Send drops a 300px
+  menu: `Paste into the prompt of`, the agents of the shown space (all when it has none; focused
+  first, then the most recent) with tab and status, a `Clear after sending` checkbox (off: `kept,
+  marked sent`), Copy as text, Delete sent comments (when some are), Delete all comments. The
+  button reads `Send N comments` for the unsent ones, or `Send N again` when every one was sent.
+  Sending writes one prompt to the clipboard, closes the window (a tab stays), runs `agent.focus`
+  then `terminal.paste`: it lands in the agent's prompt unsubmitted. What went is marked `sent: {
+  to, at }` (a green `✓ sent to <agent>` on its card), or removed when the checkbox is on; an edit
+  clears the mark.
 - **Sessions**: rescans every 30s and whenever the space or focused terminal changes. A click
   resumes the session in a new tab in its recorded folder; `+` (fades in on hover) adds
   comma-separated tags; clicking a tag filters by it; search takes words and `#tag`s.
@@ -142,13 +160,13 @@ deepseek, generic), used by both mods. Shared state:
 `t3.favorites`, `t3.sessions.tags`, `t3.commit.agent`, `t3.commit.settings` (`{ agents: [{ id,
 name, logo, model, effort, command, off? }], prompt }`, each left out while it matches the
 default), `t3.review.comments` (by repository root: `[{ id, path, side: "new" | "old", line, from, code,
-body, at }]`, `line` null for the whole file), `t3.commit.models` (listings by program: `{ at, models: [{ id, label, detail, efforts }],
+body, at, sent, area }]`, `line` null for the whole file, `area` the section it was left in, `sent` `{ to, at }` or null), `t3.review.clearSent` (true: clear comments once sent), `t3.commit.models` (listings by program: `{ at, models: [{ id, label, detail, efforts }],
 default: { label, efforts }, error? }`). Calls: `exec`, `hc send` (cd),
-`run("terminal.open" | "layout.select" | "layout.toggle" | "space.select" | "space.new" | "mod.open")`,
+`run("terminal.open" | "layout.select" | "layout.toggle" | "space.select" | "space.new" | "mod.open" | "agent.focus" | "terminal.paste")`,
 `setShared`, `pickFolder`, `notify`. Shipped mods relied on: `workspace-status`, and art from
 `workspace-chrome` (spinner, check, square, chevron-down, plus, panel-right, x, git-compare) and `t3-files`
-(file, folder, chevrons); `t3-changes` adds `undo`, `chevron-up`, `chevron-down`, `rotate-cw`, `app-window`, `message-square`
-and `send`.
+(file, folder, chevrons); `t3-changes` adds `undo`, `chevron-up`, `chevron-down`, `rotate-cw`, `app-window`, `message-square`,
+`send` and `file-diff`.
 
 ## Watch out
 
@@ -212,7 +230,8 @@ and `send`.
   to Staged, and Commit then commits only that.
 - In the review, clicking line 3 then shift-clicking line 5 and typing ⌘↵ leaves a `Lines 3–5`
   card under line 5 and `1` on the file's comment button; Send lists the space's agents, and
-  sending to one submits the prompt there and empties `t3.review.comments` for that repository.
+  sending to one leaves the prompt in its input, unsubmitted, and the card tagged `sent to
+  <agent>`; with Clear after sending ticked, `t3.review.comments` for that repository empties.
 - Open in a tab turns the window into a `Review · <repo>` tab with the same viewed files.
 - Review all changes opens the window with every file as a card; clicking a file in the tree
   brings its card to the top, Viewed folds it and ticks it in the tree, and Esc closes it.

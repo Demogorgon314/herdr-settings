@@ -8,16 +8,17 @@
 // what was viewed unless that file's diff changed since. j / k step through
 // the files; in the window Esc closes.
 //
-// Comments, as on GitHub: click a line to comment on it (shift-click another
-// to take the lines between), or the comment button in a card's header for the
-// whole file; the composer sits at the bottom of the diff (⌘↵ adds, Esc
-// cancels), the comments show under their lines, a click on one edits it, and
-// Send hands them all to an agent in this space (see comments.js).
+// Comments, as on GitHub: a line shows + under the pointer; click it to comment
+// (shift-click another to take the lines between), or the comment button in a
+// card's header for the whole file. The form opens under the lines (⌘↵ adds,
+// Esc cancels), the comments show there and follow their lines as the files
+// change, a click on one edits it in place, and Send pastes them into the
+// prompt of an agent in this space, for the person to submit (see comments.js).
 
 import { div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle, TextareaState, Textarea, Popup } from "gpui-base";
-import { exec, readTextFile, watchFolder, theme, settings, props, closeOverlay, run, agents, spaces, hc, notify } from "herdr";
-import { commentsOf, saveComments, anchorOf, where, commentOn, formatComments, wrap, ago } from "./comments.js";
+import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle, TextareaState, Textarea, Popup, TextView } from "gpui-base";
+import { exec, readTextFile, watchFolder, theme, settings, props, closeOverlay, run, agents, spaces, setShared } from "herdr";
+import { CLEAR_KEY, commentsOf, saveComments, clearsSent, toSend, anchorOf, quote, locate, where, commentOn, formatComments, wrap, ago } from "./comments.js";
 
 // Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie):
 // the folder watch would see it, and every refresh would start the next one.
@@ -32,6 +33,12 @@ const ROW = 20, HEAD = 38, FOOT = 14, LARGE = 800, MAX = 20000, TREE_ROW = 26;
 const VIEWED = 82, NOTE = 40, GUTTERS = 2 + 46 * 2 + 16;
 // A comment card's height before its body lines, and each line.
 const CARD = 54, CARD_LINE = 18;
+// The comment form's rows (its text row is as tall as the text), and its
+// controls' widths, which say what a press on one hit.
+const FORM = { "c-head": 46, "c-tabs": 40, "c-hint": 32, "c-foot": 50 }, TAB = 76, SUGGEST = 28, ADD = 112, CANCEL = 72, DELETE = 72;
+// Where the form's content starts in from either side of the pane: the list's
+// padding, the card's border, the form's margin, border and padding.
+const FORM_IN = 16 + 1 + 12 + 1 + 10;
 const FADE = { duration: 140, easing: "ease-out" };
 
 // Text draws a tab as nothing: pad each to the next 4-column stop.
@@ -171,12 +178,14 @@ export class DiffWindow {
     this.tree = buildTree(this.files);
     this.list = VirtualListScrollHandle.new();
     this.handle = cx.focus_handle(); this.handle.focus();
-    // The comment being written: { i, anchor, a, b } on rows a..b of file i, { i, file } on the file, or { i, id } editing one.
-    this.draft = null;
+    // The comment being written: { i, anchor, a, b } on rows a..b of file i, { i, file } on the file, or { i, id } editing one;
+    // key names file i, and pins the rows, so both are found again when the diff is read again.
+    this.draft = null; this.preview = false; this.textH = 0;
     this.note = TextareaState.new({ placeholder: "Leave a comment" });
-    this.note.set_auto_grow(2, 8);
     this.note.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
     this.note.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
+    // The text row grows with the text, as GitHub's does.
+    this.note.on("change", (_e, cx) => { if (this.draft && this.noteH() !== this.textH) this.layout(); cx.notify(); });
     this.load(cx, false);
     if (!this.repo.on) this.watch(cx);
   }
@@ -204,7 +213,10 @@ export class DiffWindow {
           if (this.viewed.has(k) && this.viewed.get(k) !== d.sig) { this.viewed.delete(k); this.folded.delete(k); }
         });
         this.error = null;
+        this.rebase();
         this.layout();
+        // Comments whose lines moved keep their new numbers, which a send names.
+        if (this.moved.size) saveComments(this.repo.root, commentsOf(this.repo.root).map((c) => this.moved.has(c.id) ? { ...c, ...this.moved.get(c.id) } : c));
       } catch (e) { this.error = String(e.message ?? e); }
       this.loading = false;
       cx.notify();
@@ -219,26 +231,55 @@ export class DiffWindow {
     });
   }
 
-  // Where each comment shows: under the first row of a card with its file that
-  // is its line, else (the whole file, or a line no longer in the diff) at the
-  // top of the first card with its file. One with no card isn't shown, but sends.
+  // Where each comment shows: under the row it belongs on (see locate) in a
+  // card with its file, its own section's first; else (the whole file, or a line
+  // no longer in the diff) at the top of that card. One with no card isn't shown,
+  // but sends. Comments found on other line numbers than they say go in moved.
   place(comments) {
-    const at = new Map(), wanted = new Map();
-    for (const c of comments) if (c.line != null) {
-      const k = `${c.path}|${c.side}|${c.line}`;
-      wanted.set(k, [...(wanted.get(k) ?? []), c]);
+    const at = new Map(), by = new Map();
+    this.moved = new Map();
+    for (const c of comments) {
+      const cards = this.files.map((_f, i) => i).filter((i) => this.files[i].path === c.path)
+        .sort((x, y) => (this.files[y].area === c.area) - (this.files[x].area === c.area));
+      if (!cards.length) continue;
+      at.set(c.id, `${cards[0]}:top`);
+      if (c.line == null || !c.code?.length) continue;
+      for (const i of cards) {
+        const r = locate(this.diffs[i].rows, c);
+        if (r < 0) continue;
+        at.set(c.id, `${i}:${r}`);
+        const { line } = anchorOf(this.diffs[i].rows[r]);
+        if (line !== c.line) this.moved.set(c.id, { line, from: c.from == null ? c.from : c.from + line - c.line });
+        break;
+      }
     }
-    this.files.forEach((f, i) => this.diffs[i].rows.forEach((row, r) => {
-      const a = anchorOf(row), mine = a && wanted.get(`${f.path}|${a.side}|${a.line}`);
-      if (mine) for (const c of mine) if (!at.has(c.id)) at.set(c.id, `${i}:${r}`);
-    }));
-    for (const c of comments) if (!at.has(c.id)) {
-      const i = this.files.findIndex((f) => f.path === c.path);
-      if (i >= 0) at.set(c.id, `${i}:top`);
-    }
-    const by = new Map();
     for (const c of comments) if (at.has(c.id)) by.set(at.get(c.id), [...(by.get(at.get(c.id)) ?? []), c]);
     return by;
+  }
+
+  // The rows a draft is on, so they're found again (see locate).
+  pins(rows, ...rs) {
+    return rs.map((r) => ({ ...anchorOf(rows[r]), code: rows.slice(Math.max(0, r - 3), r + 1).filter(anchorOf).map(quote) }));
+  }
+
+  // After the diff is read again: the draft's file and lines where they are now.
+  // One whose file or lines went closes; what was typed stays for the next.
+  rebase() {
+    const d = this.draft;
+    if (!d) return;
+    const i = this.files.findIndex((f) => keyOf(f) === d.key);
+    if (i < 0) { this.draft = null; return; }
+    d.i = i;
+    if (d.file || d.id) return;
+    const rows = this.diffs[i].rows, [anchor, a, b] = d.pins.map((p) => locate(rows, p));
+    if (anchor < 0 || a < 0 || b < 0) this.draft = null;
+    else Object.assign(d, { anchor, a, b, pins: this.pins(rows, anchor, a, b) });
+  }
+
+  // The form's text row: the text's height at what fits, within GitHub's bounds.
+  noteH() {
+    const cols = Math.max(20, Math.floor((this.paneW - 2 * FORM_IN - 2 - 16 - 18) / 7.3));
+    return Math.min(260, Math.max(96, wrap(this.note.value(), cols).length * 18 + 18));
   }
 
   // One list item per row of the cards: each file's header, its rows (and
@@ -249,30 +290,37 @@ export class DiffWindow {
     this.commentSig = JSON.stringify(comments);
     // Comment bodies wrap at what fits in a card, in the code font.
     const cols = Math.max(20, Math.floor((this.paneW - 32 - 2 - 24 - 22) / 7.3));
+    const d = this.draft;
+    this.textH = this.noteH();
+    const form = (i) => { if (d) d.i = i; for (const type of ["c-head", "c-tabs", "c-text", "c-hint", "c-foot"]) this.items.push({ type, i }); };
+    // The comment being edited shows as the form, in its place.
     const cards = (key, i) => {
       for (const c of by.get(key) ?? []) {
+        if (d?.id === c.id) { form(i); continue; }
         const lines = wrap(c.body, cols);
         this.items.push({ type: "comment", i, c, lines, outdated: key.endsWith(":top") && c.line != null, size: CARD + lines.length * CARD_LINE });
       }
     };
     this.files.forEach((f, i) => {
-      const d = this.diffs[i];
       this.heads.push(this.items.length);
       this.items.push({ type: "head", i });
       if (this.folded.has(keyOf(f))) { this.items.push({ type: "gap" }); return; }
+      const rows = this.diffs[i], mine = d && !d.id && d.i === i;
       cards(`${i}:top`, i);
-      if (d.note) this.items.push({ type: "note", i, text: d.note });
-      d.rows.forEach((row, r) => { this.items.push({ type: "row", i, r, row }); cards(`${i}:${r}`, i); });
-      if (d.more) this.items.push({ type: "note", i, text: `Showing the first ${MAX.toLocaleString()} lines` });
+      if (mine && d.file) form(i);
+      if (rows.note) this.items.push({ type: "note", i, text: rows.note });
+      rows.rows.forEach((row, r) => {
+        this.items.push({ type: "row", i, r, row }); cards(`${i}:${r}`, i);
+        if (mine && !d.file && r === d.b) form(i);
+      });
+      if (rows.more) this.items.push({ type: "note", i, text: `Showing the first ${MAX.toLocaleString()} lines` });
       this.items.push({ type: "foot" });
     });
-    // Room under the last card for the composer, so it covers no line.
-    if (this.draft) this.items.push({ type: "space" });
     // The longest line on show, so rows scroll sideways together.
     this.width = Math.max(0, ...this.items.map((it) => it.type === "row" ? it.row.text.length : 0)) * 7.3 + 24;
     this.sx = Math.min(this.sx, this.maxX());
     this.sizes = this.items.map((it) => it.type === "head" ? HEAD : it.type === "foot" ? FOOT : it.type === "gap" ? 10 : it.type === "note" ? 32
-      : it.type === "comment" ? it.size : it.type === "space" ? 180 : ROW);
+      : it.type === "comment" ? it.size : it.type === "c-text" ? this.textH + 16 : FORM[it.type] ?? ROW);
   }
 
   // A list item's key, which is what a click on it reports.
@@ -297,6 +345,16 @@ export class DiffWindow {
       else this.fold(i, cx);
     } else if (type === "row") this.pick(+a, +b, cx);
     else if (type === "comment") this.edit(a, cx);
+    else if (type === "c-tabs") {
+      const x = this.pressX - FORM_IN - 1, right = this.paneW - FORM_IN - 1 - 6;
+      if (x >= 0 && x < 2 * TAB) { this.preview = x >= TAB; if (!this.preview) this.note.focus(); cx.notify(); }
+      else if (this.canSuggest() && this.pressX > right - SUGGEST && this.pressX <= right) this.suggest(cx);
+    } else if (type === "c-foot") {
+      const x = this.pressX, right = this.paneW - FORM_IN;
+      if (x > right - ADD && x <= right) this.submit(cx);
+      else if (x > right - ADD - 8 - CANCEL && x <= right - ADD - 8) this.cancel(cx);
+      else if (this.draft?.id && x >= FORM_IN && x < FORM_IN + DELETE) this.remove(this.draft.id, cx);
+    }
   }
 
   // A click on a line starts a comment there; shift-click stretches it to the
@@ -310,8 +368,24 @@ export class DiffWindow {
 
   compose(draft, cx) {
     if (this.draft?.id && !draft.id) this.note.set_value("");
-    this.draft = draft; this.current = draft.i;
+    const f = this.files[draft.i], rows = this.diffs[draft.i].rows;
+    this.draft = { ...draft, key: keyOf(f), pins: draft.file || draft.id ? null : this.pins(rows, draft.anchor, draft.a, draft.b) };
+    this.current = draft.i; this.preview = false;
+    this.folded.delete(keyOf(f));
     this.note.focus();
+    this.layout(); cx.notify();
+    // Bring the whole form on screen, its buttons last.
+    const foot = this.items.findIndex((it) => it.type === "c-foot");
+    if (foot >= 0) cx.timer.after(30, (cx) => { this.list.scroll_to_item(foot); cx.notify(); });
+  }
+
+  // GitHub's suggestion: the picked lines as they read now, in a block to edit.
+  canSuggest() { const d = this.draft; return Boolean(d && !d.file && !d.id); }
+  suggest(cx) {
+    const d = this.draft, rows = this.diffs[d.i].rows.slice(d.a, d.b + 1).filter((r) => anchorOf(r) && r.kind !== "-");
+    const text = this.note.value(), lines = rows.map((r) => r.text === " " ? "" : r.text);
+    this.note.set_value(`${text}${text && !text.endsWith("\n") ? "\n" : ""}\`\`\`suggestion\n${lines.join("\n")}\n\`\`\`\n`);
+    this.preview = false; this.note.focus();
     this.layout(); cx.notify();
   }
 
@@ -324,7 +398,7 @@ export class DiffWindow {
   }
 
   cancel(cx) {
-    this.draft = null; this.note.set_value(""); this.handle.focus();
+    this.draft = null; this.preview = false; this.note.set_value(""); this.handle.focus();
     this.layout(); cx.notify();
   }
 
@@ -332,8 +406,8 @@ export class DiffWindow {
     const d = this.draft, body = this.note.value().trim(), root = this.repo.root;
     if (!d || !body) return;
     const list = commentsOf(root), f = this.files[d.i];
-    if (d.id) saveComments(root, list.map((c) => c.id === d.id ? { ...c, body, at: Date.now() } : c));
-    else saveComments(root, [...list, d.file ? commentOn(f.path, body) : commentOn(f.path, body, this.diffs[d.i].rows, d.a, d.b)]);
+    if (d.id) saveComments(root, list.map((c) => c.id === d.id ? { ...c, body, at: Date.now(), sent: null } : c));
+    else saveComments(root, [...list, d.file ? commentOn(f, body) : commentOn(f, body, this.diffs[d.i].rows, d.a, d.b)]);
     this.cancel(cx);
   }
 
@@ -349,23 +423,21 @@ export class DiffWindow {
     return (here.length ? here : all).slice().sort((a, b) => (b.focused - a.focused) || (b.seq - a.seq));
   }
 
-  // Pastes every comment into the agent's prompt and submits it; sent ones are cleared.
+  // Pastes the comments a send takes into the agent's prompt, unsubmitted, and
+  // shows the agent so the person can read, edit and submit them. Herdr pastes
+  // only from the clipboard, so they go through it. Then they're marked sent,
+  // or cleared when the menu says so.
   send(agent, cx) {
-    const root = this.repo.root, list = commentsOf(root);
+    const root = this.repo.root, all = commentsOf(root), list = toSend(all);
     this.menu = false;
     if (!list.length) return;
-    this.sendingTo = agent.program?.name ?? agent.title; cx.notify();
-    cx.spawn(async (cx) => {
-      const r = await hc(["send", agent.address, formatComments(root, list)]).catch((e) => ({ code: 1, stderr: String(e.message ?? e) }));
-      this.sendingTo = null;
-      if (r?.code === 0) {
-        const sent = new Set(list.map((c) => c.id));
-        saveComments(root, commentsOf(root).filter((c) => !sent.has(c.id)));
-        this.sent = { name: agent.program?.name ?? agent.title, address: agent.address, count: list.length };
-        cx.timer.after(6000, (cx) => { this.sent = null; cx.notify(); });
-      } else notify({ title: "Couldn't send the comments", body: (r?.stderr || "").trim().split("\n").pop() || agent.title, level: "error" });
-      this.layout(); cx.notify();
-    });
+    const ids = new Set(list.map((c) => c.id)), sent = { to: agent.program?.name ?? agent.title, at: Date.now() };
+    saveComments(root, clearsSent() ? all.filter((c) => !ids.has(c.id)) : all.map((c) => ids.has(c.id) ? { ...c, sent } : c));
+    cx.write_to_clipboard(formatComments(root, list));
+    if (!this.tab) this.close();
+    run("agent.focus", { terminal: agent.address });
+    run("terminal.paste");
+    this.layout(); cx.notify();
   }
 
   // Brings a file's header to the top. The list only reveals an item, at
@@ -471,66 +543,103 @@ export class DiffWindow {
     if (it.type === "head") return this.head(it.i, t);
     if (it.type === "gap") return div().h(10).flex_none();
     if (it.type === "foot") return div().h(FOOT).flex_none().child(this.side(div().h(6), t).border_b(1).rounded_b(8));
-    if (it.type === "space") return div().h(180).flex_none();
+    if (it.type.startsWith("c-")) return this.form(it, t);
     if (it.type === "comment") return this.card(it, t);
     if (it.type === "note") return this.side(h_flex().w_full().h(32).flex_none().px(14).items_center().text_size(11.5).text_color(t.dim), t).child(it.text);
     const { kind, old, next, text } = it.row;
     if (kind === "@") return this.side(h_flex().w_full().h(ROW).flex_none().px(12).items_center().bg(t.accent + "14").text_color(t.dim), t).child(div().flex_1().min_w(0).truncate().child(text));
     const gutter = (n) => div().w(46).flex_none().pr(8).text_right().text_color(t.dim).child(n === undefined ? "" : String(n));
     const d = this.draft, picked = d && !d.file && !d.id && d.i === it.i && it.r >= d.a && it.r <= d.b;
-    return this.side(h_flex().w_full().h(ROW).flex_none().items_center().cursor_pointer(), t)
+    // GitHub's + on the line under the pointer. A row takes no handlers, and a
+    // hover colour reaches no child, so the + sits on a clear layer over the
+    // whole row that its own hover shows.
+    return this.side(h_flex().w_full().h(ROW).flex_none().relative().items_center().cursor_pointer(), t)
       .when(kind === "+", (e) => e.bg(t.ansi2 + "18")).when(kind === "-", (e) => e.bg(t.ansi1 + "18"))
       .when(picked, (e) => e.bg(t.accent + "30"))
       .child(gutter(old)).child(gutter(next))
       .child(div().w(16).flex_none().text_color(kind === "+" ? t.ansi2 : kind === "-" ? t.ansi1 : t.dim).child(kind === "+" || kind === "-" ? kind : ""))
-      .child(div().flex_1().min_w(0).h_full().overflow_hidden().child(div().h_full().flex().items_center().ml(-this.sx).whitespace_nowrap().child(text)));
+      .child(div().flex_1().min_w(0).h_full().overflow_hidden().child(div().h_full().flex().items_center().ml(-this.sx).whitespace_nowrap().child(text)))
+      .when(Boolean(anchorOf(it.row)), (e) => e.child(div().id(`plus:${it.i}:${it.r}`).absolute().inset_0().opacity(0).hover((s) => s.opacity(1))
+        .child(div().absolute().left(87).top(1.5).size(17).flex().items_center().justify_center().rounded(4).bg(t.accent)
+          .child(svg("mods/workspace-chrome/plus.svg").size(13).text_color(t.accent_foreground ?? t.background)))));
   }
 
   // A comment under its line, inside the file's card.
   card(it, t) {
-    const { c, lines } = it, editing = this.draft?.id === c.id;
+    const { c, lines } = it;
     return this.side(div().w_full().h(it.size).flex_none().px(12).py(6), t)
-      .child(v_flex().size_full().p(10).gap(4).rounded(8).border_1().border_color(editing ? t.accent : t.border).bg(t.background).cursor_pointer()
+      .child(v_flex().size_full().p(10).gap(4).rounded(8).border_1().border_color(t.border).bg(t.background).cursor_pointer()
         .child(h_flex().h(16).gap(6).items_center().text_size(11).text_color(t.dim)
           .child(svg("mods/t3-changes/message-square.svg").size(11).text_color(t.accent))
           .child(div().text_color(t.muted).child(where(c)))
           .when(it.outdated, (el) => el.child(div().px(4).rounded(3).border_1().border_color(t.border).child("not in the diff now")))
           .child(div().child(`· ${ago(c.at)}`))
+          .when(Boolean(c.sent), (el) => el.child(h_flex().gap(3).items_center().text_color(t.ansi2)
+            .child(svg("mods/workspace-chrome/check.svg").size(10).text_color(t.ansi2)).child(`sent to ${c.sent?.to}`)))
           .child(div().flex_1())
-          .child(div().child(editing ? "editing below" : "click to edit")))
+          .child(div().child("click to edit")))
         .children(lines.map((l) => div().h(CARD_LINE).whitespace_nowrap().child(l || " "))));
   }
 
-  // The comment being written, pinned to the bottom of the diff.
-  composer(t) {
-    const d = this.draft, f = this.files[d.i], editing = d.id && commentsOf(this.repo.root).find((c) => c.id === d.id);
-    const what = editing ? where(editing) : d.file ? "File" : where(commentOn(f.path, "", this.diffs[d.i].rows, d.a, d.b));
-    const button = (id, label, act, solid, danger) => h_flex().id(id).h(26).px(10).items_center().rounded(6).text_size(12).cursor_pointer()
-      .when(solid, (el) => el.bg(t.solid).text_color(t.solid_foreground))
-      .when(!solid, (el) => el.border_1().border_color(t.border).text_color(danger ? t.ansi1 : t.foreground).hover((s) => s.bg(t.hover)))
-      .active((s) => s.opacity(0.8)).on_click((_e, cx) => act(cx)).child(label);
-    return v_flex().absolute().left(16).right(16).bottom(12).p(10).gap(8).rounded(10).bg(t.popover ?? t.background).border_1().border_color(t.accent).shadow_lg()
-      .child(h_flex().gap(6).items_center().text_size(12)
-        .child(svg("mods/t3-changes/message-square.svg").size(13).flex_none().text_color(t.accent))
-        .child(div().flex_none().font_semibold().child(editing ? `Edit comment · ${what}` : what === "File" ? "Comment on the file" : `Comment on ${what.toLowerCase()}`))
-        .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(f.path))
-        .child(this.icon("note-cancel", "mods/workspace-chrome/x.svg", "Cancel (Esc)", (cx) => this.cancel(cx), t)))
-      .child(div().id("note-box").w_full().px(8).py(6).rounded(6).border_1().border_color(this.typing ? t.accent : t.border).bg(t.background).cursor_text()
-        .on_key_down((e, cx) => {
-          if (e.key === "enter" && e.modifiers.platform) { cx.stop_propagation(); this.submit(cx); }
-          else if (e.key === "escape") { cx.stop_propagation(); this.cancel(cx); }
-        })
-        .child(Textarea.new(this.note).w_full().text_size(12).text_color(t.foreground)))
-      .child(h_flex().gap(6).items_center()
-        .child(div().flex_1().text_size(11).text_color(t.dim).child(d.file || d.id ? "⌘↵ to save · Esc to cancel" : "⌘↵ to add · shift-click another line for a range · Esc to cancel"))
-        .when(Boolean(editing), (el) => el.child(button("note-delete", "Delete", (cx) => this.remove(d.id, cx), false, true)))
-        .child(button("note-cancel-2", "Cancel", (cx) => this.cancel(cx), false))
-        .child(button("note-save", editing ? "Update" : "Add comment", (cx) => this.submit(cx), true)));
+  // The comment form, GitHub's, under its lines. A list row can't hold
+  // handlers, so the form is five rows drawn as one box (the title; Write,
+  // Preview and the suggestion button; the text; a hint; the buttons), and
+  // click() tells its controls apart by where the press landed.
+  form(it, t) {
+    const d = this.draft, type = it.type, f = this.files[it.i], editing = d.id && commentsOf(this.repo.root).find((c) => c.id === d.id);
+    const outer = (h) => this.side(div().w_full().h(h).flex_none().px(12), t);
+    const frame = () => div().size_full().px(10).bg(t.background).border_l(1).border_r(1).border_color(t.border);
+    const editor = () => div().size_full().border_l(1).border_r(1).border_color(t.border);
+    if (type === "c-head") {
+      const lines = (c) => { const p = c.side === "old" ? "L" : "R"; return c.from != null && c.from !== c.line ? `lines ${p}${c.from} to ${p}${c.line}` : `line ${p}${c.line}`; };
+      const title = editing ? `Edit comment${editing.line != null ? ` on ${lines(editing)}` : ""}`
+        : d.file ? "Add a comment on this file" : `Add a comment on ${lines(commentOn(f, "", this.diffs[it.i].rows, d.a, d.b))}`;
+      return outer(FORM[type]).pt(8).child(frame().border_t(1).rounded_t(8).flex().items_center().gap(8)
+        .child(svg("mods/t3-changes/message-square.svg").size(14).flex_none().text_color(t.accent))
+        .child(div().flex_none().text_size(13).font_semibold().child(title))
+        .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(f.path)));
+    }
+    if (type === "c-tabs") {
+      const tab = (label, on, first) => div().w(TAB).h_full().flex_none().flex().items_center().justify_center().text_size(12.5).cursor_pointer()
+        .border_color(t.border).text_color(on ? t.foreground : t.muted)
+        .when(on, (el) => el.bg(t.background).border_r(1).when(!first, (el) => el.border_l(1)))
+        .when(!on, (el) => el.border_b(1).hover((s) => s.text_color(t.foreground)))
+        .child(label);
+      return outer(FORM[type]).child(frame().child(h_flex().size_full().overflow_hidden().rounded_t(6).border_t(1).border_l(1).border_r(1).border_color(t.border).bg(t.raised)
+        .child(tab("Write", !this.preview, true)).child(tab("Preview", this.preview, false))
+        .child(h_flex().flex_1().h_full().pr(6).justify_end().items_center().border_b(1).border_color(t.border)
+          .when(this.canSuggest(), (el) => el.child(div().w(SUGGEST).h(26).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
+            .child(svg("mods/t3-changes/file-diff.svg").size(15).text_color(t.muted)))))));
+    }
+    if (type === "c-text") {
+      const text = this.note.value().trim();
+      return outer(this.textH + 16).child(frame().child(editor().px(8).py(8).child(this.preview
+        ? div().w_full().h(this.textH).px(8).py(6).text_size(12.5).text_color(text ? t.foreground : t.dim)
+          .child(TextView.markdown("note-preview", text || "Nothing to preview").size_full().scrollable(true))
+        : div().w_full().h(this.textH).px(8).py(6).rounded(6).border_1().border_color(this.typing ? t.accent : t.border).bg(t.background).cursor_text()
+          .child(Textarea.new(this.note).w_full().h(this.textH - 14).text_size(12.5).text_color(t.foreground)))));
+    }
+    if (type === "c-hint") {
+      const hint = ["Markdown is supported", ...(this.canSuggest() ? ["shift-click another line to take the lines between", "± suggests a change"] : []), "⌘↵ to save", "Esc to cancel"];
+      return outer(FORM[type]).child(frame().child(editor().h_full().border_b(1).rounded_b(6).px(10).flex().items_center()
+        .text_size(11.5).text_color(t.dim).child(div().flex_1().min_w(0).truncate().child(hint.join(" · ")))));
+    }
+    const button = (label, w, solid, danger, off) => div().w(w).h(32).flex_none().flex().items_center().justify_center().rounded(6).text_size(12.5).cursor_pointer()
+      .when(solid, (el) => el.bg(t.solid).text_color(t.solid_foreground).opacity(off ? 0.5 : 1))
+      .when(!solid, (el) => el.border_1().border_color(t.border).bg(t.raised).text_color(danger ? t.ansi1 : t.foreground).hover((s) => s.bg(t.hover)))
+      .child(label);
+    return outer(FORM[type]).pb(8).child(frame().border_b(1).rounded_b(8).flex().items_center().gap(8)
+      .when(Boolean(editing), (el) => el.child(button("Delete", DELETE, false, true)))
+      .child(div().flex_1())
+      .child(button("Cancel", CANCEL))
+      .child(button(editing ? "Update comment" : "Add comment", ADD, true, false, !this.note.value().trim())));
   }
 
-  // Send, in the title bar: the comments to an agent, picked from a menu.
+  // Send, in the title bar: the comments to an agent, picked from a menu, with
+  // whether sent ones are cleared, Copy, and the deletes.
   sendMenu(n, t) {
-    const open = Boolean(this.menu), targets = this.targets();
+    const open = Boolean(this.menu), targets = this.targets(), root = this.repo.root;
+    const all = commentsOf(root), fresh = all.filter((c) => !c.sent).length, clear = clearsSent();
     const glyph = (p, size, color) => !p?.icon ? svg("mods/workspace-chrome/terminal.svg").size(size).flex_none().text_color(color)
       : p.tint ? svg(p.icon).size(size).flex_none().text_color(color) : image(p.icon).w(size).h(size).flex_none();
     const row = (id, lead, label, detail, act, color) => h_flex().id(id).h(30).flex_none().px(8).gap(8).items_center().rounded(6).text_size(12)
@@ -538,35 +647,41 @@ export class DiffWindow {
       .on_click((_e, cx) => act(cx))
       .child(lead).child(div().flex_1().min_w(0).truncate().child(label))
       .child(div().flex_none().max_w(150).truncate().text_size(11).text_color(t.dim).child(detail));
-    const busy = Boolean(this.sendingTo);
     const trigger = h_flex().id("send-comments").h(26).px(10).gap(6).items_center().rounded(6).text_size(12).cursor_pointer()
       .bg(t.solid).text_color(t.solid_foreground).active((s) => s.opacity(0.85))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .tooltip("Send the comments to an agent")
+      .tooltip("Paste the comments into an agent's prompt")
       .on_click((_e, cx) => {
         // The press outside the menu already closed it: this click must not reopen it.
         const just = Date.now() - (this.menuClosed ?? 0) < 400;
-        this.menu = !this.menu && !just && !busy; this.menuClosed = 0; cx.notify();
+        this.menu = !this.menu && !just; this.menuClosed = 0; cx.notify();
       })
-      .child(svg(busy ? "mods/workspace-chrome/spinner.svg" : "mods/t3-changes/send.svg").size(12).text_color(t.solid_foreground).when(busy, (s) => s.spin(900)))
-      .child(busy ? `Sending to ${this.sendingTo}…` : `Send ${n} ${n === 1 ? "comment" : "comments"}`)
+      .child(svg("mods/t3-changes/send.svg").size(12).text_color(t.solid_foreground))
+      .child(fresh ? `Send ${fresh} ${fresh === 1 ? "comment" : "comments"}` : `Send ${n} again`)
       .child(svg("mods/workspace-chrome/chevron-down.svg").size(11).text_color(t.solid_foreground));
-    const full = Math.max(1, targets.length) * 31 + 2 * 31 + 40;
+    const full = (Math.max(1, targets.length) + (fresh < n ? 4 : 3)) * 31 + 40;
     return Popup.new("send-popup", trigger).anchor("top_right")
       .content(v_flex().id("send-menu").mt(4).w(300).overflow_hidden()
         .h(open ? full : 0).opacity(open ? 1 : 0).transition("height", { duration: 180, easing: "ease-out" }).transition("opacity", FADE)
         .p(open ? 4 : 0).gap(1).rounded(8).bg(t.popover).border_1().border_color(open ? t.border : t.popover).shadow_md()
         .on_mouse_down_out((_e, cx) => { if (this.menu) { this.menu = false; this.menuClosed = Date.now(); cx.notify(); } })
-        .child(div().h(24).px(8).flex().items_center().text_size(11).text_color(t.dim).child("Send to"))
+        .child(div().h(24).px(8).flex().items_center().text_size(11).text_color(t.dim).child("Paste into the prompt of"))
         .when(!targets.length, (el) => el.child(div().h(30).px(8).flex().items_center().text_size(12).text_color(t.dim).child("No agent running")))
         .children(targets.map((a) => row(`send-${a.address}`, glyph(a.program, 14, a.program?.color ?? t.foreground), a.program?.name ?? a.title,
           `${a.tab_name || `Tab ${a.tab_index + 1}`}${a.focused ? " · focused" : ""} · ${a.status}`, (cx) => this.send(a, cx))))
         .child(div().h(1).mx(4).my(3).flex_none().bg(t.border))
-        .child(row("send-copy", svg("mods/t3-files/copy.svg").size(13).flex_none().text_color(t.muted), "Copy as text", "", (cx) => {
-          cx.write_to_clipboard(formatComments(this.repo.root, commentsOf(this.repo.root))); this.menu = false; cx.notify();
+        .child(row("send-clears", this.checkbox(clear, t), "Clear after sending", clear ? "" : "kept, marked sent", (cx) => {
+          setShared(CLEAR_KEY, !clear); cx.notify();
         }))
+        .child(row("send-copy", svg("mods/t3-files/copy.svg").size(13).flex_none().text_color(t.muted), "Copy as text", "", (cx) => {
+          cx.write_to_clipboard(formatComments(root, toSend(all))); this.menu = false; cx.notify();
+        }))
+        .when(fresh < n, (el) => el.child(row("send-delete-sent", svg("mods/workspace-chrome/x.svg").size(13).flex_none().text_color(t.muted), "Delete sent comments", String(n - fresh), (cx) => {
+          const gone = this.draft?.id && all.find((c) => c.id === this.draft.id)?.sent;
+          saveComments(root, all.filter((c) => !c.sent)); this.menu = false; if (gone) this.draft = null; this.layout(); cx.notify();
+        })))
         .child(row("send-clear", svg("mods/workspace-chrome/x.svg").size(13).flex_none().text_color(t.ansi1), "Delete all comments", "", (cx) => {
-          saveComments(this.repo.root, []); this.menu = false; this.draft = null; this.layout(); cx.notify();
+          saveComments(root, []); this.menu = false; this.draft = null; this.layout(); cx.notify();
         }, t.ansi1)));
   }
 
@@ -617,7 +732,14 @@ export class DiffWindow {
     const viewed = this.files.filter((f) => this.viewed.has(keyOf(f))).length;
     return v_flex().id("diff-window").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => {
-        if (this.typing) return;
+        // In the comment's text: ⌘↵ saves it, Esc closes the form.
+        if (this.typing) {
+          if (e.key === "enter" && e.modifiers?.platform) this.submit(cx);
+          else if (e.key === "escape") this.cancel(cx);
+          else return;
+          cx.stop_propagation();
+          return;
+        }
         if (e.key === "escape" && this.draft) this.cancel(cx);
         else if (e.key === "escape" && !this.tab) this.close();
         else if (e.key === "j") this.jump(this.current + 1, cx);
@@ -631,12 +753,7 @@ export class DiffWindow {
         .child(div().text_size(12).text_color(t.muted).child(`${this.files.length} ${this.files.length === 1 ? "file" : "files"}`))
         .child(div().text_size(12).text_color(t.ansi2).child(`+${add}`)).child(div().text_size(12).text_color(t.ansi1).child(`−${del}`))
         .child(div().flex_1())
-        .when(Boolean(this.sent), (el) => el.child(h_flex().id("sent").h(24).px(8).gap(6).items_center().rounded(6).bg(t.ansi2 + "22").text_size(11.5).text_color(t.ansi2).cursor_pointer()
-          .tooltip("Show the agent").on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-          .on_click((_e, cx) => { run("agent.focus", { terminal: this.sent.address }); this.sent = null; cx.notify(); })
-          .child(svg("mods/workspace-chrome/check.svg").size(12).text_color(t.ansi2))
-          .child(`Sent ${this.sent.count} to ${this.sent.name}`)))
-        .when(!notes && !this.sent && Boolean(this.diffs) && this.files.length > 0, (el) => el.child(div().text_size(11.5).text_color(t.dim).child("Click a line to comment")))
+        .when(!notes && Boolean(this.diffs) && this.files.length > 0, (el) => el.child(div().text_size(11.5).text_color(t.dim).child("Click a line to comment")))
         .when(notes > 0, (el) => el.child(this.sendMenu(notes, t)))
         .child(div().text_size(11.5).text_color(t.dim).child(`${viewed} / ${this.files.length} viewed`))
         .child(this.icon("diff-refresh", "mods/t3-changes/rotate-cw.svg", "Refresh", (cx) => this.load(cx), t, Boolean(this.loading)))
@@ -671,7 +788,6 @@ export class DiffWindow {
               .child(v_virtual_list("diff-rows", this.items.length, this.sizes, (i) => this.key(this.items[i], i),
                 (range) => this.items.slice(range.start, range.end).map((it) => this.item(it, t)))
                 .track_scroll(this.list).on_item_click((key, cx) => this.click(key, cx)).size_full()))
-            .child(Scrollbar.vertical("diff-rows").viewport_from_layout().absolute().inset_0())
-            .when(Boolean(this.draft), (el) => el.child(this.composer(t))))));
+            .child(Scrollbar.vertical("diff-rows").viewport_from_layout().absolute().inset_0()))));
   }
 }
