@@ -757,7 +757,7 @@ export class DiffWindow {
         .when(notes > 0, (el) => el.child(this.sendMenu(notes, t)))
         .child(div().text_size(11.5).text_color(t.dim).child(`${viewed} / ${this.files.length} viewed`))
         .child(this.icon("diff-refresh", "mods/t3-changes/rotate-cw.svg", "Refresh", (cx) => this.load(cx), t, Boolean(this.loading)))
-        .child(this.icon("fold-all", `mods/t3-files/chevron-${allFolded ? "down" : "right"}.svg`, allFolded ? "Expand all" : "Collapse all", (cx) => this.foldAll(!allFolded, cx), t))
+        .child(this.icon("fold-all", `mods/t3-changes/chevrons-${allFolded ? "up-down" : "down-up"}.svg`, allFolded ? "Expand all" : "Collapse all", (cx) => this.foldAll(!allFolded, cx), t))
         .when(!this.tab, (el) => el
           .child(this.icon("diff-tab", "mods/t3-changes/app-window.svg", "Open in a tab", () => this.toTab(), t))
           .child(this.icon("diff-close", "mods/workspace-chrome/x.svg", "Close (Esc)", () => this.close(), t))))

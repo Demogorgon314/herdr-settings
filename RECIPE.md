@@ -166,7 +166,7 @@ default: { label, efforts }, error? }`). Calls: `exec`, `hc send` (cd),
 `setShared`, `pickFolder`, `notify`. Shipped mods relied on: `workspace-status`, and art from
 `workspace-chrome` (spinner, check, square, chevron-down, plus, panel-right, x, git-compare) and `t3-files`
 (file, folder, chevrons); `t3-changes` adds `undo`, `chevron-up`, `chevron-down`, `rotate-cw`, `app-window`, `message-square`,
-`send` and `file-diff`.
+`send`, `file-diff`, `chevrons-down-up` and `chevrons-up-down` (Collapse all / Expand all).
 
 ## Watch out
 
