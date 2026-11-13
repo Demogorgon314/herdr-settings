@@ -35,16 +35,22 @@ text 11–13px.
   untracked `ansi2`, deleted and conflicted `ansi1`, modified `ansi3`), the name, its folder
   dimmed, `+a −d` and the status letter. With nothing changed, an icon in a circle over a title
   and a line of detail.
-- **Diff window**: GitHub's "Files changed" in a 1040×760 window or a tab: a 44px title bar
+- **Diff window**: GitHub's "Files changed" in a 1040×760 window or a tab, in GitHub's colours
+  (`t3-changes/github.js`: Primer's light or dark palette by the app background's luminance, over
+  the theme's names, so `background` is `#ffffff` / `#0d1117`, `border` `#d1d9e0` / `#3d444d`,
+  `accent` `#0969da` / `#4493f8`): a 44px title bar
   (`Changes`, file count, `+a −d`, a Send button once there are comments, `x / N viewed`, Refresh,
   Collapse all, and in the window Open in a tab and ✕), a 260px tree of the files under their
   sections (one-child folders squashed to `src/lib`, a ✓ on viewed files) and the diffs stacked as
   cards: a 34px `raised` header (fold chevron, status, folder dimmed and name bold, a section
   badge, `+a −d`, a 40px comment button with the file's count, an 82px Viewed checkbox), then 20px rows with old and new line numbers in two
-  46px gutters, hunk lines on an `accent` tint, added and removed lines on `ansi2` / `ansi1` at
-  `18` alpha, in the terminal font. A comment is a card under its line inside the file's card
+  46px gutters, in the terminal font. Lines and their numbers take GitHub's diff colours, the
+  numbers a shade deeper: added `#dafbe1` / `#aceebb`, removed `#ffebe9` / `#ffcecb`, the hunk
+  line `#ddf4ff` with a `#b6e3ff` cell over both gutters, picked lines `#fff8c5` / `#fae17d` (dark:
+  `#2ea04326` / `#3fb9504d`, `#f851491a` / `#f851494d`, `#388bfd1a` / `#388bfd66`, `#bb800926` /
+  `#bb800966`). A comment is a card under its line inside the file's card
   (`background`, 1px `border`, radius 8: `Lines 3–5 · 2m ago`, then the text wrapped to fit);
-  picked lines tint `accent` at `30`. A commentable line under the pointer shows a 17px `accent`
+  A commentable line under the pointer shows a 17px `accent`
   square (radius 4) with a 13px `accent_foreground` + over the sign column, 87px in, on a layer over
   the whole row at opacity 0, 1 while hovered (a row takes no handlers, and a hover colour reaches
   no child). The comment form is
@@ -55,7 +61,8 @@ text 11–13px.
   one on `background` with no bottom border; at the right a 28px `file-diff.svg` button for line
   comments), the text (a textarea in a radius-6 box, `accent` border while typing, 96–260px tall
   as the text needs; Preview renders it as Markdown) and a dim hint line, then Delete (editing) at
-  the left and Cancel / Add comment (`solid`, half opacity while empty) at the right, 32px tall.
+  the left and Cancel (`#f6f8fa`) / Add comment (green `#1f883d`, `#94d3a2` while empty;
+  Send is the same green) at the right, 32px tall.
 - **Sessions**: rows of title, `time · folder` and tags, led by the agent's mark on a 22×20
   `raised` tile: Claude `#D97757`, Codex `#5B7CFF`, pi `#1F9D8A`, OpenCode in the text colour. The
   header counts sessions per agent as mark + number, only for agents present.
@@ -99,7 +106,8 @@ panel's width. Every button has a hover fill and a darker pressed state.
 - **Diff window**: a tree row scrolls its card to the top and `j` / `k` step through the files;
   a click on a card header folds it, on Viewed marks it viewed and folds it (unmarking unfolds);
   diffs over 800 lines start folded, saying `Large diff · N lines`; Collapse all folds every card.
-  Sideways scrolling moves the code alone: headers and line numbers stay. Esc closes the window.
+  Long lines wrap at what fits, as GitHub's do (at spaces, else mid-word), each wrapped row 20px
+  with the number and sign on the first; nothing scrolls sideways. Esc closes the window.
   It reads the changes again when the folder changes and on Refresh, keeping viewed and folded
   files by `area:path` (a viewed file whose diff changed is unviewed, as on GitHub). Open in a tab
   closes the window and opens `tab.new { name: "Review · <repo>", mod: "t3-changes", props }` with
@@ -203,8 +211,9 @@ default: { label, efforts }, error? }`). Calls: `exec`, `hc send` (cd),
   re-pointed, so opening the review again from the panel makes a window, not a second tab.
 - `scroll_to_item(i, "top")` only reveals, at the nearer edge: to put a header at the top, reveal
   the item a pane-height below it first, then the header on the next frame.
-- A card's header must stay in the viewport, so the diff pane doesn't scroll sideways as a whole:
-  `on_scroll_wheel` moves an offset (`ml(-x)`) on each row's code cell instead.
+- The list needs every row's height before it draws, so wrapping is counted, not measured: the
+  code's width over 7.3px a character (a monospace font's 0.6em at 12px, with room to spare), and
+  laid out again when the pane's width changes.
 - Codex user prompts start with injected context (AGENTS.md, `<environment_context>`…): skip it for
   titles; leave out delegated sub-agent rollouts; collapse a thread's rollouts to the newest.
 - A panel is not re-rendered when the space or focus changes: Sessions watches `where()` on a 500ms

@@ -18,6 +18,7 @@
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle, TextareaState, Textarea, Popup, TextView } from "gpui-base";
 import { exec, readTextFile, watchFolder, theme, settings, props, closeOverlay, run, agents, spaces, setShared } from "herdr";
+import { github } from "./github.js";
 import { CLEAR_KEY, commentsOf, saveComments, clearsSent, toSend, anchorOf, quote, locate, where, commentOn, formatComments, wrap, ago } from "./comments.js";
 
 // Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie):
@@ -29,8 +30,11 @@ export const statusColor = (status, t) => status === "A" || status === "U" ? t.a
 export const keyOf = (f) => `${f.area}:${f.path}`;
 
 const ROW = 20, HEAD = 38, FOOT = 14, LARGE = 800, MAX = 20000, TREE_ROW = 26;
-// The Viewed and comment buttons' widths, and what a row spends before its code: borders, two gutters, the sign.
-const VIEWED = 82, NOTE = 40, GUTTERS = 2 + 46 * 2 + 16;
+// The Viewed and comment buttons' widths, and what a row spends beside its code:
+// the list's padding, borders, two gutters, the sign and a margin at the right.
+const VIEWED = 82, NOTE = 40, BESIDE = 32 + 2 + 46 * 2 + 16 + 12;
+// A character of the code font at 12px (monospace fonts advance 0.6em), with room to spare.
+const CHAR = 7.3;
 // A comment card's height before its body lines, and each line.
 const CARD = 54, CARD_LINE = 18;
 // The comment form's rows (its text row is as tall as the text), and its
@@ -174,7 +178,7 @@ export class DiffWindow {
     this.files = p.files; this.current = p.focus ?? 0;
     // By file (keyOf), so a reload keeps them: viewed holds each file's diff as it was seen.
     this.viewed = new Map(p.viewed ?? []); this.folded = new Set(p.folded ?? []); this.seen = new Set(p.folded ? this.files.map(keyOf) : []);
-    this.diffs = null; this.sx = 0; this.paneW = 0; this.paneH = 0; this.closedDirs = new Set();
+    this.diffs = null; this.paneW = 0; this.paneH = 0; this.closedDirs = new Set();
     this.tree = buildTree(this.files);
     this.list = VirtualListScrollHandle.new();
     this.handle = cx.focus_handle(); this.handle.focus();
@@ -278,7 +282,7 @@ export class DiffWindow {
 
   // The form's text row: the text's height at what fits, within GitHub's bounds.
   noteH() {
-    const cols = Math.max(20, Math.floor((this.paneW - 2 * FORM_IN - 2 - 16 - 18) / 7.3));
+    const cols = Math.max(20, Math.floor((this.paneW - 2 * FORM_IN - 2 - 16 - 18) / CHAR));
     return Math.min(260, Math.max(96, wrap(this.note.value(), cols).length * 18 + 18));
   }
 
@@ -289,7 +293,9 @@ export class DiffWindow {
     const comments = commentsOf(this.repo.root), by = this.place(comments);
     this.commentSig = JSON.stringify(comments);
     // Comment bodies wrap at what fits in a card, in the code font.
-    const cols = Math.max(20, Math.floor((this.paneW - 32 - 2 - 24 - 22) / 7.3));
+    const cols = Math.max(20, Math.floor((this.paneW - 32 - 2 - 24 - 22) / CHAR));
+    // Long code lines wrap at what fits, as GitHub's do, so none is cut off.
+    const code = Math.max(20, Math.floor((this.paneW - BESIDE) / CHAR));
     const d = this.draft;
     this.textH = this.noteH();
     const form = (i) => { if (d) d.i = i; for (const type of ["c-head", "c-tabs", "c-text", "c-hint", "c-foot"]) this.items.push({ type, i }); };
@@ -310,26 +316,21 @@ export class DiffWindow {
       if (mine && d.file) form(i);
       if (rows.note) this.items.push({ type: "note", i, text: rows.note });
       rows.rows.forEach((row, r) => {
-        this.items.push({ type: "row", i, r, row }); cards(`${i}:${r}`, i);
+        const lines = row.kind === "@" || row.text.length <= code ? [row.text] : wrap(row.text, code);
+        this.items.push({ type: "row", i, r, row, lines, size: lines.length * ROW }); cards(`${i}:${r}`, i);
         if (mine && !d.file && r === d.b) form(i);
       });
       if (rows.more) this.items.push({ type: "note", i, text: `Showing the first ${MAX.toLocaleString()} lines` });
       this.items.push({ type: "foot" });
     });
-    // The longest line on show, so rows scroll sideways together.
-    this.width = Math.max(0, ...this.items.map((it) => it.type === "row" ? it.row.text.length : 0)) * 7.3 + 24;
-    this.sx = Math.min(this.sx, this.maxX());
     this.sizes = this.items.map((it) => it.type === "head" ? HEAD : it.type === "foot" ? FOOT : it.type === "gap" ? 10 : it.type === "note" ? 32
-      : it.type === "comment" ? it.size : it.type === "c-text" ? this.textH + 16 : FORM[it.type] ?? ROW);
+      : it.type === "comment" || it.type === "row" ? it.size : it.type === "c-text" ? this.textH + 16 : FORM[it.type] ?? ROW);
   }
 
   // A list item's key, which is what a click on it reports.
   key(it, index) {
     return it.type === "head" ? `head:${it.i}` : it.type === "row" ? `row:${it.i}:${it.r}` : it.type === "comment" ? `comment:${it.c.id}` : `${it.type}:${index}`;
   }
-
-  // How far the code can scroll sideways in the pane as drawn.
-  maxX() { return Math.max(0, (this.width ?? 0) - (this.paneW - 32 - GUTTERS)); }
 
   // A list row can't hold handlers, so a header click is told apart by where
   // the press landed: on Viewed it marks the file, on the comment button it
@@ -547,21 +548,25 @@ export class DiffWindow {
     if (it.type === "comment") return this.card(it, t);
     if (it.type === "note") return this.side(h_flex().w_full().h(32).flex_none().px(14).items_center().text_size(11.5).text_color(t.dim), t).child(it.text);
     const { kind, old, next, text } = it.row;
-    if (kind === "@") return this.side(h_flex().w_full().h(ROW).flex_none().px(12).items_center().bg(t.accent + "14").text_color(t.dim), t).child(div().flex_1().min_w(0).truncate().child(text));
-    const gutter = (n) => div().w(46).flex_none().pr(8).text_right().text_color(t.dim).child(n === undefined ? "" : String(n));
+    // As GitHub colours them: the numbers a shade deeper than their line; picked lines yellow.
+    if (kind === "@") return this.side(h_flex().w_full().h(ROW).flex_none().items_center().bg(t.hunkLine).text_color(t.muted), t)
+      .child(div().w(92).h_full().flex_none().bg(t.hunkNum)).child(div().flex_1().min_w(0).pl(12).truncate().child(text));
     const d = this.draft, picked = d && !d.file && !d.id && d.i === it.i && it.r >= d.a && it.r <= d.b;
+    const [line, num] = picked ? [t.pickLine, t.pickNum] : kind === "+" ? [t.addLine, t.addNum] : kind === "-" ? [t.delLine, t.delNum] : [null, null];
+    // A wrapped line keeps its number and sign on its first row.
+    const gutter = (n) => div().w(46).h_full().flex_none().pr(8).when(Boolean(num), (el) => el.bg(num))
+      .text_color(num ? t.foreground : t.dim).child(div().h(ROW).flex().items_center().justify_end().child(n === undefined ? "" : String(n)));
     // GitHub's + on the line under the pointer. A row takes no handlers, and a
     // hover colour reaches no child, so the + sits on a clear layer over the
     // whole row that its own hover shows.
-    return this.side(h_flex().w_full().h(ROW).flex_none().relative().items_center().cursor_pointer(), t)
-      .when(kind === "+", (e) => e.bg(t.ansi2 + "18")).when(kind === "-", (e) => e.bg(t.ansi1 + "18"))
-      .when(picked, (e) => e.bg(t.accent + "30"))
+    return this.side(h_flex().w_full().h(it.size).flex_none().relative().items_start().cursor_pointer(), t)
+      .when(Boolean(line), (e) => e.bg(line))
       .child(gutter(old)).child(gutter(next))
-      .child(div().w(16).flex_none().text_color(kind === "+" ? t.ansi2 : kind === "-" ? t.ansi1 : t.dim).child(kind === "+" || kind === "-" ? kind : ""))
-      .child(div().flex_1().min_w(0).h_full().overflow_hidden().child(div().h_full().flex().items_center().ml(-this.sx).whitespace_nowrap().child(text)))
+      .child(div().w(16).h(ROW).flex_none().flex().items_center().pl(4).child(kind === "+" || kind === "-" ? kind : ""))
+      .child(v_flex().flex_1().min_w(0).overflow_hidden().children(it.lines.map((l) => div().h(ROW).flex().items_center().whitespace_nowrap().child(l || " "))))
       .when(Boolean(anchorOf(it.row)), (e) => e.child(div().id(`plus:${it.i}:${it.r}`).absolute().inset_0().opacity(0).hover((s) => s.opacity(1))
         .child(div().absolute().left(87).top(1.5).size(17).flex().items_center().justify_center().rounded(4).bg(t.accent)
-          .child(svg("mods/workspace-chrome/plus.svg").size(13).text_color(t.accent_foreground ?? t.background)))));
+          .child(svg("mods/workspace-chrome/plus.svg").size(13).text_color(t.accent_foreground)))));
   }
 
   // A comment under its line, inside the file's card.
@@ -591,9 +596,12 @@ export class DiffWindow {
     const frame = () => div().size_full().px(10).bg(t.background).border_l(1).border_r(1).border_color(t.border);
     const editor = () => div().size_full().border_l(1).border_r(1).border_color(t.border);
     if (type === "c-head") {
-      const lines = (c) => { const p = c.side === "old" ? "L" : "R"; return c.from != null && c.from !== c.line ? `lines ${p}${c.from} to ${p}${c.line}` : `line ${p}${c.line}`; };
-      const title = editing ? `Edit comment${editing.line != null ? ` on ${lines(editing)}` : ""}`
-        : d.file ? "Add a comment on this file" : `Add a comment on ${lines(commentOn(f, "", this.diffs[it.i].rows, d.a, d.b))}`;
+      // GitHub's names for lines: L for the old file's numbers, R for the new one's.
+      const at = (a) => `${a.side === "old" ? "L" : "R"}${a.line}`;
+      const span = (first, end) => first.side === end.side && first.line === end.line ? `line ${at(end)}` : `lines ${at(first)} to ${at(end)}`;
+      const picked = d.file || d.id ? [] : this.diffs[it.i].rows.slice(d.a, d.b + 1).map(anchorOf).filter(Boolean);
+      const title = editing ? `Edit comment${editing.line != null ? ` on ${span({ side: editing.side, line: editing.from ?? editing.line }, editing)}` : ""}`
+        : d.file ? "Add a comment on this file" : `Add a comment on ${span(picked[0], picked.at(-1))}`;
       return outer(FORM[type]).pt(8).child(frame().border_t(1).rounded_t(8).flex().items_center().gap(8)
         .child(svg("mods/t3-changes/message-square.svg").size(14).flex_none().text_color(t.accent))
         .child(div().flex_none().text_size(13).font_semibold().child(title))
@@ -625,8 +633,8 @@ export class DiffWindow {
         .text_size(11.5).text_color(t.dim).child(div().flex_1().min_w(0).truncate().child(hint.join(" · ")))));
     }
     const button = (label, w, solid, danger, off) => div().w(w).h(32).flex_none().flex().items_center().justify_center().rounded(6).text_size(12.5).cursor_pointer()
-      .when(solid, (el) => el.bg(t.solid).text_color(t.solid_foreground).opacity(off ? 0.5 : 1))
-      .when(!solid, (el) => el.border_1().border_color(t.border).bg(t.raised).text_color(danger ? t.ansi1 : t.foreground).hover((s) => s.bg(t.hover)))
+      .when(solid, (el) => el.bg(off ? t.green_off : t.green).text_color(t.green_foreground))
+      .when(!solid, (el) => el.border_1().border_color(t.border).bg(t.button).text_color(danger ? t.ansi1 : t.button_foreground).hover((s) => s.bg(t.hover)))
       .child(label);
     return outer(FORM[type]).pb(8).child(frame().border_b(1).rounded_b(8).flex().items_center().gap(8)
       .when(Boolean(editing), (el) => el.child(button("Delete", DELETE, false, true)))
@@ -648,7 +656,7 @@ export class DiffWindow {
       .child(lead).child(div().flex_1().min_w(0).truncate().child(label))
       .child(div().flex_none().max_w(150).truncate().text_size(11).text_color(t.dim).child(detail));
     const trigger = h_flex().id("send-comments").h(26).px(10).gap(6).items_center().rounded(6).text_size(12).cursor_pointer()
-      .bg(t.solid).text_color(t.solid_foreground).active((s) => s.opacity(0.85))
+      .bg(t.green).text_color(t.green_foreground).active((s) => s.opacity(0.85))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .tooltip("Paste the comments into an agent's prompt")
       .on_click((_e, cx) => {
@@ -656,9 +664,9 @@ export class DiffWindow {
         const just = Date.now() - (this.menuClosed ?? 0) < 400;
         this.menu = !this.menu && !just; this.menuClosed = 0; cx.notify();
       })
-      .child(svg("mods/t3-changes/send.svg").size(12).text_color(t.solid_foreground))
+      .child(svg("mods/t3-changes/send.svg").size(12).text_color(t.green_foreground))
       .child(fresh ? `Send ${fresh} ${fresh === 1 ? "comment" : "comments"}` : `Send ${n} again`)
-      .child(svg("mods/workspace-chrome/chevron-down.svg").size(11).text_color(t.solid_foreground));
+      .child(svg("mods/workspace-chrome/chevron-down.svg").size(11).text_color(t.green_foreground));
     const full = (Math.max(1, targets.length) + (fresh < n ? 4 : 3)) * 31 + 40;
     return Popup.new("send-popup", trigger).anchor("top_right")
       .content(v_flex().id("send-menu").mt(4).w(300).overflow_hidden()
@@ -727,7 +735,7 @@ export class DiffWindow {
     // Comments changed elsewhere (another copy of the review, a send): lay out again.
     if (this.diffs && JSON.stringify(commentsOf(this.repo.root)) !== this.commentSig) this.layout();
     const notes = commentsOf(this.repo.root).length;
-    const t = theme(), add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
+    const t = github(theme()), add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
     const allFolded = this.files.length > 0 && this.files.every((f) => this.folded.has(keyOf(f)));
     const viewed = this.files.filter((f) => this.viewed.has(keyOf(f))).length;
     return v_flex().id("diff-window").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13).track_focus(this.handle)
@@ -769,16 +777,10 @@ export class DiffWindow {
           .on_size_change((size, cx) => {
             const wider = size.width !== this.paneW;
             this.paneW = size.width; this.paneH = size.height;
-            if (wider && this.diffs) this.layout(); else this.sx = Math.min(this.sx, this.maxX());
+            if (wider && this.diffs) this.layout();
             cx.notify();
           })
           .on_mouse_down("left", (e, cx) => { this.pressX = e.local_position?.x ?? e.position.x - (e.bounds?.x ?? 0); this.pressShift = Boolean(e.modifiers?.shift); cx.stop_propagation(); })
-          // Sideways wheel or trackpad moves the code alone; headers and line numbers stay.
-          .on_scroll_wheel((e, cx) => {
-            if (Math.abs(e.delta.x) <= Math.abs(e.delta.y)) return;
-            const sx = Math.min(Math.max(0, this.sx - e.delta.x), this.maxX());
-            if (sx !== this.sx) { this.sx = sx; cx.notify(); }
-          })
           .when(!this.diffs, (el) => el.child(h_flex().size_full().gap(8).items_center().justify_center().text_color(this.error ? t.ansi1 : t.dim).text_size(12.5)
             .when(!this.error, (el) => el.child(svg("mods/workspace-chrome/spinner.svg").size(14).text_color(t.accent).spin(900)))
             .child(this.error ? `Cannot show the changes: ${this.error}` : "Loading changes…")))
