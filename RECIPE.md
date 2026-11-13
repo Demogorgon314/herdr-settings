@@ -29,7 +29,11 @@ text 11–13px.
   track; labels show from 326px of track, icons only below.
 - **Files**: the focused pane's folder as a lazy tree with git marks (A, M, D, U).
 - **Changes**: a header (`N files`, `+a −d`, and a Review all changes icon), a multi-line message
-  box (2–8 rows) with ✨ in its corner, an agent chip and a 24px Commit button; then the changed
+  box (2–8 rows) with ✨ in its corner, an agent chip and a 24px Commit button with a chevron
+  dropping Commit (⌘↵) / Commit & Push (⌘⇧↵); under them a 24px branch row (branch icon, the
+  name, `→ origin/main` dimmed or `not published` / `no remote`, `↓N ↑N`, a Fetch icon that spins
+  while fetching, and a bordered button: `Publish branch`, `Push ↑N`, `Pull ↓N` or `Sync ↓N ↑N`,
+  `Pushing…` and the like while it runs); then the changed
   files in folding sections as editors draw them: Merge, Staged, Changes, Untracked, each an
   uppercase label with a count pill. A 26px row is a file icon in its status colour (added and
   untracked `ansi2`, deleted and conflicted `ansi1`, modified `ansi3`), the name, its folder
@@ -80,6 +84,14 @@ panel's width. Every button has a hover fill and a darker pressed state.
 
 - **Files**: hovering a row fades in Favorite (folders), `cd` here (folders) and Copy path; a done
   action shows a green check for 1.2s instead of a toast.
+- **Branch** (`t3-changes/sync.js`): read with every refresh (`symbolic-ref`, `@{upstream}`,
+  `rev-list --left-right --count`); `git fetch --quiet` when a repository is first shown and every
+  3 minutes. Publish is `push -u <origin or the first remote> HEAD`, Push `push`, Pull
+  `pull --ff-only`, Sync `pull --rebase --autostash` then `push` (a failed rebase runs
+  `rebase --abort`). Network steps run as `env GIT_TERMINAL_PROMPT=0 git …` with 5 minutes to
+  finish; errors show git's `fatal:` / `error:` / `[rejected]` line in the note under the box,
+  successes in the green banner (`Pushed 2 commits to origin/main`). Commit & Push commits, then
+  does whatever the button would.
 - **Changes**: ✨ runs the agent from the chip (Claude Haiku and Codex GPT-6-Luna at low effort,
   pi at low thinking on its own model, OpenCode on its own, or yours; the chip, at most 240px, and
   the menu name each one's model and effort, a config default by what it resolves to, and mark

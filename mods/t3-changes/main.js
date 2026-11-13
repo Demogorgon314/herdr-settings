@@ -5,6 +5,7 @@ import { SETTINGS_KEY, agentsFrom, commandFor, buildPrompt, truncateDiff, cleanM
 import { CommitSettings } from "./settings.js";
 import { DiffWindow, READ, AREAS, statusColor, keyOf, readChanges } from "./diff.js";
 import { discover, modelName, effortLabel } from "./models.js";
+import { readBranch, syncAction, fetchRemotes, runSync } from "./sync.js";
 
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
@@ -16,6 +17,9 @@ const key = () => JSON.stringify(location());
 const AGENT_KEY = "t3.commit.agent";
 const FADE = { duration: 140, easing: "ease-out" }, OPEN = { duration: 180, easing: "ease-out" };
 const FILE_ROW = 26;
+// How often the remote is fetched in the background, as editors do, so Pull knows what's new.
+const FETCH_EVERY = 180000;
+const MOVING = { publish: "Publishing…", push: "Pushing…", pull: "Pulling…", sync: "Syncing…" };
 const paths = (files) => [...new Set(files.map((f) => f.path))];
 
 export default class Changes extends View {
@@ -31,11 +35,12 @@ export default class Changes extends View {
       this.message = this.input.value();
       if (hadMessage !== Boolean(this.message.trim())) cx.notify();
     });
-    this.input.on("submit", (_e, cx) => this.commit(cx));
+    this.input.on("submit", (e, cx) => this.commit(cx, Boolean(e.modifiers?.shift)));
     this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     this.refresh(cx);
     cx.timer.every(10000, (cx) => this.refresh(cx));
+    cx.timer.every(FETCH_EVERY, (cx) => this.fetch(cx));
   }
 
   // A review window or tab stops watching its folder when it goes.
@@ -73,7 +78,7 @@ export default class Changes extends View {
     const { cwd, on } = location(), context = key();
     if (context !== this.context) {
       this.context = context; this.root = null; this.files = []; this.viewing = null;
-      this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.watched = null; this.limited = false;
+      this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.watched = null; this.limited = false; this.branch = null;
     }
     if (!cwd) return;
     this.loading = true; this.again = false;
@@ -82,9 +87,12 @@ export default class Changes extends View {
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
         if (key() !== context) return;
         if (top.code !== 0) { this.root = null; this.files = []; this.error = "Not a git repository"; return; }
-        const root = top.stdout.trim(), { files, hasHead, limited } = await readChanges({ root, on });
+        const root = top.stdout.trim();
+        const [{ files, hasHead, limited }, branch] = await Promise.all([readChanges({ root, on }), readBranch({ root, on }).catch(() => null)]);
         if (key() !== context) return;
-        this.root = root; this.on = on; this.hasHead = hasHead; this.files = files; this.limited = limited; this.error = null;
+        this.root = root; this.on = on; this.hasHead = hasHead; this.files = files; this.limited = limited; this.error = null; this.branch = branch;
+        // A repository newly shown is fetched at once, then every few minutes.
+        if (this.fetchedRoot !== root) { this.fetchedRoot = root; this.fetch(cx); }
         if (this.viewing && !files.some((f) => keyOf(f) === this.viewing)) this.viewing = null;
         this.watch(root, cx);
       } catch (e) { if (key() === context) this.error = String(e); }
@@ -134,7 +142,8 @@ export default class Changes extends View {
     this.git([file.area === "untracked" ? ["clean", "-f", "-q", "--", file.path] : ["restore", "--worktree", "--", file.path]], cx);
   }
 
-  commit(cx) {
+  // With push, the commit then goes up as the sync button would move it.
+  commit(cx, push = false) {
     if (!this.message.trim() || !this.root || this.busy || this.loading || this.context !== key()) return;
     const root = this.root, on = this.on, context = this.context, message = this.message.trim();
     // With anything staged only that is committed; otherwise everything, as editors do.
@@ -148,11 +157,51 @@ export default class Changes extends View {
         }
         if (key() === context) { this.message = ""; this.input.set_value(""); }
         const head = await exec("git", ["log", "-1", "--format=%h"], { cwd: root, on }).catch(() => null);
-        if (key() === context) this.celebrate(`Committed ${head?.stdout.trim() ?? ""}`.trim(), cx);
+        const done = `Committed ${head?.stdout.trim() ?? ""}`.trim();
+        let moved = null;
+        if (push) {
+          try { moved = await this.move({ root, on }, cx); }
+          catch (e) { if (key() === context) this.note = `${done}, but ${e.message ?? e}`; }
+        }
+        if (key() === context) this.celebrate(moved ? `${done} · ${moved}` : done, cx);
       } catch (e) { if (key() === context) this.note = `Commit failed: ${e}`; }
-      finally { this.busy = false; this.refresh(cx); cx.notify(); }
+      finally { this.busy = false; this.moving = null; this.refresh(cx); cx.notify(); }
     });
     cx.notify();
+  }
+
+  // Fetches quietly in the background; a failure (offline, say) just leaves the counts as they were.
+  fetch(cx) {
+    const root = this.root, on = this.on, context = this.context;
+    if (!root || this.fetching || !(this.branch?.upstream || this.branch?.remote)) return;
+    this.fetching = true; cx.notify();
+    cx.spawn(async (cx) => {
+      await fetchRemotes({ root, on });
+      this.fetching = false;
+      if (key() === context) this.refresh(cx);
+      cx.notify();
+    });
+  }
+
+  // The sync button: moves commits between the branch and its upstream (see sync.js).
+  sync(cx) {
+    const root = this.root, on = this.on, context = this.context;
+    if (!root || this.busy || this.loading || this.context !== key()) return;
+    this.busy = true; this.note = null; this.syncMenu = false;
+    cx.spawn(async (cx) => {
+      try { const said = await this.move({ root, on }, cx); if (said && key() === context) this.celebrate(said, cx); }
+      catch (e) { if (key() === context) this.note = String(e.message ?? e); }
+      finally { this.busy = false; this.moving = null; this.refresh(cx); cx.notify(); }
+    });
+    cx.notify();
+  }
+
+  // Reads the branch afresh and moves what it needs: what to say, or null with nothing to move.
+  async move(repo, cx) {
+    const b = await readBranch(repo), action = syncAction(b);
+    if (!action) return null;
+    this.moving = action; cx.notify();
+    return runSync(repo, action, b);
   }
 
   // A short-lived line above the message box: slides open, then folds away.
@@ -178,7 +227,7 @@ export default class Changes extends View {
   // Why the generate button can't run now, or null when it can.
   blocked() {
     if (!this.root || this.loading) return "Loading changes…";
-    if (this.busy) return "Commit in progress…";
+    if (this.busy) return this.moving ? "Syncing with the remote…" : "Commit in progress…";
     if (this.on) return "AI messages work in local repositories only";
     if (!this.files.length) return "No changes to describe";
     if (this.message.trim()) return "Clear the message to regenerate";
@@ -300,6 +349,62 @@ export default class Changes extends View {
         .child(row("agent-settings", "mods/workspace-chrome/settings.svg", t.muted, "Settings…", "agents, prompt", false, (cx) => this.openSettings(cx))));
   }
 
+  // Commit, and beside it a menu with Commit & Push (⌘⇧↵).
+  commitButton(t, enabled, staged) {
+    const what = staged ? "the staged files" : "everything", open = Boolean(this.commitMenu);
+    const face = (el) => el.h(24).flex().items_center().bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim)
+      .when(enabled, (e) => e.cursor_pointer().hover((s) => s.opacity(0.9)).active((s) => s.opacity(0.75)));
+    const row = (id, label, keys, act) => h_flex().id(id).h(28).flex_none().px(8).gap(8).items_center().rounded(6).text_size(12).cursor_pointer()
+      .hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected)).on_click((_e, cx) => { this.commitMenu = false; act(cx); })
+      .child(div().flex_1().child(label)).child(div().text_size(11).text_color(t.dim).child(keys));
+    const chevron = face(div().id("commit-more").px(5).rounded_r(6).border_l(1).border_color(enabled ? t.background + "55" : t.border))
+      .on_click((_e, cx) => {
+        // The press outside the menu already closed it: this click must not reopen it.
+        const just = Date.now() - (this.commitMenuClosed ?? 0) < 400;
+        this.commitMenu = enabled && !this.commitMenu && !just; this.commitMenuClosed = 0; cx.notify();
+      })
+      .child(svg("mods/workspace-chrome/chevron-down.svg").size(11).text_color(enabled ? t.solid_foreground : t.dim));
+    return h_flex().flex_none().items_center()
+      .child(face(div().id("commit").px(10).rounded_l(6).text_size(11.5))
+        .tooltip(!enabled ? "Write a message first" : `Commit ${what} (⌘↵)`)
+        .on_click((_e, cx) => this.commit(cx))
+        .child(this.busy ? MOVING[this.moving] ?? "Committing…" : "Commit"))
+      .child(Popup.new("commit-more-popup", chevron).anchor("top_right").min_w(0)
+        .content(v_flex().id("commit-more-menu").mt(4).w(220).overflow_hidden()
+          .h(open ? 2 * 29 + 8 : 0).opacity(open ? 1 : 0).transition("height", OPEN).transition("opacity", FADE)
+          .p(open ? 4 : 0).gap(1).rounded(8).bg(t.popover).border_1().border_color(open ? t.border : t.popover).shadow_md()
+          .on_mouse_down_out((_e, cx) => { if (this.commitMenu) { this.commitMenu = false; this.commitMenuClosed = Date.now(); cx.notify(); } })
+          .child(row("commit-only", "Commit", "⌘↵", (cx) => this.commit(cx)))
+          .child(row("commit-push", "Commit & Push", "⌘⇧↵", (cx) => this.commit(cx, true)))));
+  }
+
+  // Under Commit: the branch, its upstream, how far ahead (↑) and behind (↓) it
+  // is, Fetch, and the one button that moves it: Publish, Push, Pull or Sync.
+  branchRow(t) {
+    const b = this.branch, action = syncAction(b), idle = !this.busy && !this.loading;
+    const label = this.moving ? MOVING[this.moving]
+      : { publish: "Publish branch", push: `Push ↑${b.ahead}`, pull: `Pull ↓${b.behind}`, sync: `Sync ↓${b.behind} ↑${b.ahead}` }[action];
+    const tip = { publish: `Push ${b.name} to ${b.remote} and track it (git push -u)`, push: `Push to ${b.upstream}`,
+      pull: `Fast-forward from ${b.upstream} (git pull --ff-only)`, sync: `Rebase onto ${b.upstream}, then push` }[action];
+    const where = b.upstream ?? (b.remote ? "not published" : "no remote");
+    return h_flex().w_full().h(24).mt(8).gap(6).items_center().text_size(11.5).text_color(t.muted)
+      .child(svg("mods/workspace-chrome/git-branch.svg").size(12).flex_none().text_color(t.dim))
+      .child(div().flex_shrink(1).min_w(0).truncate().text_color(t.foreground).child(b.name))
+      .child(div().flex_shrink(2).min_w(0).truncate().text_color(t.dim).child(`→ ${where}`))
+      .when(b.behind > 0, (el) => el.child(div().flex_none().child(`↓${b.behind}`)))
+      .when(b.ahead > 0, (el) => el.child(div().flex_none().child(`↑${b.ahead}`)))
+      .child(div().flex_1())
+      .when(Boolean(b.upstream || b.remote), (el) => el.child(div().id("fetch").size(22).flex_none().flex().items_center().justify_center().rounded(5)
+        .tooltip(this.fetching ? "Fetching…" : "Fetch").when(!this.fetching, (e) => e.cursor_pointer().hover((s) => s.bg(t.selected)))
+        .on_click((_e, cx) => this.fetch(cx))
+        .child(svg("mods/t3-changes/rotate-cw.svg").size(12).text_color(t.muted).when(Boolean(this.fetching), (s) => s.spin(900)))))
+      .when(Boolean(action || this.moving), (el) => el.child(div().id("sync").flex_none().h(22).px(8).flex().items_center().rounded(6).border_1().border_color(t.border)
+        .text_color(idle ? t.foreground : t.dim).tooltip(tip ?? "")
+        .when(idle, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected)))
+        .on_click((_e, cx) => this.sync(cx))
+        .child(label)));
+  }
+
   // A small icon button in a row or section title; it acts only while shown,
   // and its click doesn't reach the row under it.
   action(id, icon, tip, shown, act, t, danger = false) {
@@ -400,7 +505,7 @@ export default class Changes extends View {
         .child(div().id("commit-message").relative().w_full().min_w(0).pl(10).pr(32).py(6).rounded(8).border_1()
           .border_color(this.typing ? t.accent : t.border).cursor_text()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-          .on_key_down((e, cx) => { if (e.key === "enter" && e.modifiers.platform) { cx.stop_propagation(); this.commit(cx); } })
+          .on_key_down((e, cx) => { if (e.key === "enter" && e.modifiers.platform) { cx.stop_propagation(); this.commit(cx, Boolean(e.modifiers.shift)); } })
           .child(Textarea.new(this.input).w_full().text_size(12).text_color(t.foreground))
           .child(this.generateButton(t)))
         // The banner sits in the row's own column: the area's gap must not count a folded banner.
@@ -408,9 +513,8 @@ export default class Changes extends View {
         .child(h_flex().w_full().gap(8).items_center()
           .child(this.agentPicker(t))
           .child(div().flex_1())
-          .child(div().id("commit").flex_none().h(24).px(10).flex().items_center().rounded(6).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(11.5)
-            .when(enabled, (e) => e.cursor_pointer().hover((s) => s.opacity(0.9)).active((s) => s.opacity(0.75))).tooltip(!enabled ? "Write a message first" : staged ? "Commit the staged files (⌘↵)" : "Stage everything and commit (⌘↵)")
-            .on_click((_e, cx) => this.commit(cx)).child(this.busy ? "Committing…" : "Commit")))
+          .child(this.commitButton(t, enabled, staged)))
+        .when(Boolean(this.branch?.name), (el) => el.child(this.branchRow(t)))
         .child(div().id("commit-banner").w_full().overflow_hidden().h(this.bannerOpen ? 34 : 0).transition("height", OPEN)
           .child(h_flex().mt(8).h(26).w_full().gap(6).items_center().px(10).rounded(7)
             .bg(t.ansi2 + "1c").text_size(11.5).text_color(t.ansi2)

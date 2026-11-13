@@ -65,7 +65,16 @@ A missing program only turns off its own feature.
 
 Changes lists the files the way editors do, in Merge, Staged, Changes and Untracked sections.
 Hover a row for Discard (click twice), Stage or Unstage, or a section header for Stage all /
-Unstage all. Commit (⌘↵) commits what is staged, or everything when nothing is.
+Unstage all. Commit (⌘↵) commits what is staged, or everything when nothing is; its menu has
+**Commit & Push** (⌘⇧↵).
+
+Under it, the branch and its upstream with how far it is ahead (↑) and behind (↓), Fetch, and one
+button that moves it, as VS Code's does: **Publish branch** when it has no upstream, **Push ↑N**,
+**Pull ↓N** (fast-forward only), or **Sync ↓N ↑N** when both, which rebases onto the upstream
+(stashing work in progress and putting it back) and pushes. The remote is fetched in the
+background every three minutes. Nothing is forced: a rejected push stops with git's reason, and a
+rebase that conflicts is undone so you can pull in a terminal. Git never asks for a password here
+(`GIT_TERMINAL_PROMPT=0`); ssh keys and credential helpers work as in your shell.
 
 Clicking a file, or the review icon in the header (Review all changes), opens a window laid out like GitHub's "Files
 changed": the changed files as a tree on the left, every diff on the right as a card with old and
