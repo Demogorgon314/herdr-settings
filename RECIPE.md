@@ -211,6 +211,10 @@ default: { label, efforts }, error? }`). Calls: `exec`, `hc send` (cd),
   re-pointed, so opening the review again from the panel makes a window, not a second tab.
 - `scroll_to_item(i, "top")` only reveals, at the nearer edge: to put a header at the top, reveal
   the item a pane-height below it first, then the header on the next frame.
+- Open in a tab builds the tab's view inside the window's click: what that view asks of the host
+  then (git, the folder watch) belongs to the window and never answers once the window closes,
+  leaving the tab on `Loading changes…`. The review starts its first read and its watch with
+  `cx.timer.after(0, …, { owner: view })`, in a call of its own.
 - The list needs every row's height before it draws, so wrapping is counted, not measured: the
   code's width over 7.3px a character (a monospace font's 0.6em at 12px, with room to spare), and
   laid out again when the pane's width changes.

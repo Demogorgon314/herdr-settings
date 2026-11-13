@@ -172,8 +172,12 @@ function buildTree(files) {
 }
 
 export class DiffWindow {
-  constructor(cx) {
+  // view: the view showing this, which owns its tasks. Opened as a tab, it's set
+  // up inside the window's click, and its work would otherwise belong to the
+  // window and end, mid-load, when the window closes.
+  constructor(cx, view) {
     const p = props().diff;
+    this.task = { owner: view };
     this.repo = { root: p.root, on: p.on }; this.tab = Boolean(p.tab);
     this.files = p.files; this.current = p.focus ?? 0;
     // By file (keyOf), so a reload keeps them: viewed holds each file's diff as it was seen.
@@ -190,8 +194,9 @@ export class DiffWindow {
     this.note.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     // The text row grows with the text, as GitHub's does.
     this.note.on("change", (_e, cx) => { if (this.draft && this.noteH() !== this.textH) this.layout(); cx.notify(); });
-    this.load(cx, false);
-    if (!this.repo.on) this.watch(cx);
+    // Started a moment later, in a call of this view's own: what's asked of the
+    // host during the window's click ends with the window.
+    cx.timer.after(0, (cx) => { this.load(cx, false); if (!this.repo.on) this.watch(cx); }, this.task);
   }
 
   // Reads the diffs (and with fresh, the file list first) and lays them out
@@ -226,13 +231,13 @@ export class DiffWindow {
       cx.notify();
       if (first && this.diffs) this.reveal(this.current, cx);
       if (this.again) this.load(cx);
-    });
+    }, this.task);
   }
 
   watch(cx) {
     cx.spawn(async (cx) => {
       try { while (!this.gone) { await watchFolder(this.repo.root); if (!this.gone) this.load(cx); } } catch {}
-    });
+    }, this.task);
   }
 
   // Where each comment shows: under the row it belongs on (see locate) in a
@@ -377,7 +382,7 @@ export class DiffWindow {
     this.layout(); cx.notify();
     // Bring the whole form on screen, its buttons last.
     const foot = this.items.findIndex((it) => it.type === "c-foot");
-    if (foot >= 0) cx.timer.after(30, (cx) => { this.list.scroll_to_item(foot); cx.notify(); });
+    if (foot >= 0) cx.timer.after(30, (cx) => { this.list.scroll_to_item(foot); cx.notify(); }, this.task);
   }
 
   // GitHub's suggestion: the picked lines as they read now, in a block to edit.
@@ -451,7 +456,7 @@ export class DiffWindow {
     while (k + 1 < this.items.length && h + this.sizes[k + 1] <= this.paneH) h += this.sizes[++k];
     this.list.scroll_to_item(k, "top");
     cx.notify();
-    cx.timer.after(30, (cx) => { this.list.scroll_to_item(head, "top"); cx.notify(); });
+    cx.timer.after(30, (cx) => { this.list.scroll_to_item(head, "top"); cx.notify(); }, this.task);
   }
 
   jump(i, cx) {

@@ -21,7 +21,7 @@ const paths = (files) => [...new Set(files.map((f) => f.path))];
 export default class Changes extends View {
   init(_props, cx) {
     if (props()?.settings) { this.dialog = new CommitSettings(cx); return; }
-    if (props()?.diff) { this.dialog = new DiffWindow(cx); return; }
+    if (props()?.diff) { this.dialog = new DiffWindow(cx, this); return; }
     this.files = []; this.collapsed = new Set(); this.message = ""; this.handle = cx.focus_handle();
     this.gen = null; this.picking = false; this.installed = null;
     this.input = TextareaState.new({ placeholder: "Commit message (⌘↵ to commit)" });
